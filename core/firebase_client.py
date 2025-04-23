@@ -1,14 +1,6 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-Cliente para Firebase
---------------------
-Este módulo proporciona funciones para interactuar con los servicios de Firebase,
-incluyendo autenticación, Firestore y almacenamiento.
-"""
-
 import logging
 import time
+import os
 from typing import Dict, Any, Tuple, List, Optional, Union
 
 import streamlit as st
@@ -20,10 +12,18 @@ import json
 # Importar configuración
 from config.settings import FIREBASE_COLLECTION_USERS, FIREBASE_COLLECTION_CORRECTIONS
 from config.settings import FIREBASE_CONFIG as DEFAULT_FIREBASE_CONFIG
+from config.settings import FIREBASE_WEB_CONFIG as DEFAULT_FIREBASE_WEB_CONFIG
+from config.settings import IS_DEV
 # Importar la instancia del circuit breaker y la función de retry
 from core.circuit_breaker import circuit_breaker, retry_with_backoff
 
 logger = logging.getLogger(__name__)
+
+# --- CHANGE START ---
+class FirebaseWebAPIKeyMissingError(Exception):
+    """Excepción lanzada cuando no se encuentra la API key de Firebase Web"""
+    pass
+# --- CHANGE END ---
 
 # Variables globales
 firebase_initialized = False
@@ -33,7 +33,7 @@ def initialize_firebase():
     """
     Inicializa la conexión con Firebase.
     
-    Configura el cliente de Firestore utilizando las credenciales almacenadas en secrets.
+    Configura el cliente de Firestore utilizando las credenciales almacenadas en el archivo JSON.
     
     Returns:
         tuple: (db_client, success) - Cliente de Firestore y booleano indicando éxito
@@ -50,86 +50,192 @@ def initialize_firebase():
             logger.warning("Circuit breaker abierto para Firebase")
             return None, False
         
-        # Obtener credenciales de Firebase desde secrets
-        firebase_credentials = None
+        # Ruta al archivo de credenciales en la raíz del proyecto
+        cred_path = "firebase-credentials.json"
+        
+        # Inicializar Firebase con el archivo de credenciales
         try:
-            # Intentar obtener configuración desde secrets de Streamlit
-            firebase_config = st.secrets["firebase"]
+            logger.info(f"Inicializando Firebase con archivo de credenciales: {cred_path}")
+            cred = credentials.Certificate(cred_path)
+            app = firebase_admin.initialize_app(cred)
+            db = firestore.client()
             
-            # Extraer credenciales relevantes
-            firebase_credentials = {
-                "type": firebase_config.get("type", ""),
-                "project_id": firebase_config.get("project_id", ""),
-                "private_key_id": firebase_config.get("private_key_id", ""),
-                "private_key": firebase_config.get("private_key", ""),
-                "client_email": firebase_config.get("client_email", ""),
-                "client_id": firebase_config.get("client_id", ""),
-                "auth_uri": firebase_config.get("auth_uri", ""),
-                "token_uri": firebase_config.get("token_uri", ""),
-                "auth_provider_x509_cert_url": firebase_config.get("auth_provider_x509_cert_url", ""),
-                "client_x509_cert_url": firebase_config.get("client_x509_cert_url", "")
-            }
+            # Marcar como inicializado
+            firebase_initialized = True
+            
+            # Actualizar estado de servicio en session state
+            st.session_state.firebase_status = True
+            
+            # Registrar éxito
+            circuit_breaker.record_success("firebase")
+            
+            logger.info("Firebase inicializado correctamente")
+            return db, True
         except Exception as e:
-            # Si falla, usar configuración predeterminada (solo para desarrollo)
-            logger.warning(f"No se pudieron obtener credenciales de Firebase desde secrets: {e}")
-            logger.warning("Usando configuración predeterminada (solo para desarrollo)")
-            firebase_credentials = DEFAULT_FIREBASE_CONFIG
-        
-        # Verificar que tenemos las credenciales necesarias
-        if not firebase_credentials or not all([
-            firebase_credentials.get("type"),
-            firebase_credentials.get("project_id"),
-            firebase_credentials.get("private_key"),
-            firebase_credentials.get("client_email")
-        ]):
-            logger.error("Credenciales de Firebase incompletas")
-            circuit_breaker.record_failure("firebase", "incomplete_credentials")
-            return None, False
-        
-        # Asegurar que private_key está correctamente formateado con newlines
-        if "private_key" in firebase_credentials:
-            # Reemplazar \\n por \n si es necesario
-            if "\\n" in firebase_credentials["private_key"] and "\n" not in firebase_credentials["private_key"]:
-                firebase_credentials["private_key"] = firebase_credentials["private_key"].replace("\\n", "\n")
+            logger.error(f"Error inicializando Firebase con archivo de credenciales: {e}")
             
-            # Asegurar que hay newlines al principio y final si no existen
-            if not firebase_credentials["private_key"].startswith("-----BEGIN PRIVATE KEY-----\n"):
-                firebase_credentials["private_key"] = firebase_credentials["private_key"].replace(
-                    "-----BEGIN PRIVATE KEY-----", 
-                    "-----BEGIN PRIVATE KEY-----\n"
-                )
-            
-            if not firebase_credentials["private_key"].endswith("\n-----END PRIVATE KEY-----"):
-                firebase_credentials["private_key"] = firebase_credentials["private_key"].replace(
-                    "-----END PRIVATE KEY-----", 
-                    "\n-----END PRIVATE KEY-----"
-                )
-        
-        # Inicializar Firebase
-        cred = credentials.Certificate(firebase_credentials)
-        app = firebase_admin.initialize_app(cred)
-        db = firestore.client()
-        
-        # Marcar como inicializado
-        firebase_initialized = True
-        
-        # Actualizar estado de servicio en session state
-        st.session_state.firebase_status = True
-        
-        # Registrar éxito
-        circuit_breaker.record_success("firebase")
-        
-        logger.info("Firebase inicializado correctamente")
-        return db, True
-        
+            # Si estamos en modo desarrollo, usar configuración predeterminada
+            if IS_DEV:
+                try:
+                    logger.warning("Modo desarrollo: usando configuración predeterminada")
+                    firebase_credentials = DEFAULT_FIREBASE_CONFIG
+                    
+                    # Verificar que tenemos las credenciales necesarias
+                    if not firebase_credentials or not all([
+                        firebase_credentials.get("type"),
+                        firebase_credentials.get("project_id"),
+                        firebase_credentials.get("private_key"),
+                        firebase_credentials.get("client_email")
+                    ]):
+                        logger.error("Credenciales de Firebase predeterminadas incompletas")
+                        raise ValueError("Credenciales de Firebase predeterminadas incompletas")
+                    
+                    # Inicializar con credenciales predeterminadas
+                    cred = credentials.Certificate(firebase_credentials)
+                    app = firebase_admin.initialize_app(cred)
+                    db = firestore.client()
+                    
+                    # Marcar como inicializado
+                    firebase_initialized = True
+                    st.session_state.firebase_status = True
+                    
+                    logger.info("Firebase inicializado con configuración predeterminada")
+                    return db, True
+                except Exception as dev_error:
+                    logger.error(f"Error inicializando Firebase con configuración predeterminada: {dev_error}")
+                    circuit_breaker.record_failure("firebase", "initialization")
+                    st.session_state.firebase_status = False
+                    return None, False
+            else:
+                # En producción, registrar fallo
+                circuit_breaker.record_failure("firebase", "initialization")
+                st.session_state.firebase_status = False
+                return None, False
+    
     except Exception as e:
-        logger.error(f"Error inicializando Firebase: {e}")
+        logger.error(f"Error general inicializando Firebase: {e}")
         circuit_breaker.record_failure("firebase", "initialization")
         
         # Actualizar estado de servicio en session state
         st.session_state.firebase_status = False
         
         return None, False
+
+# --- AÑADIR ESTA FUNCIÓN AUXILIAR ---
+def debug_firebase_auth_request(api_key, payload, headers=None):
+    """
+    Función auxiliar para depurar la solicitud a Firebase Auth.
+    Registra en el log los detalles de la solicitud.
+    """
+    try:
+        # Registrar URL completa (sin mostrar la clave API completa)
+        safe_api_key = api_key[:8] + "..." if api_key and len(api_key) > 10 else "[no-key]"
+        logger.debug(f"URL de autenticación: https://identitytoolkit.googleapis.com/v1/accounts:XX?key={safe_api_key}")
+        
+        # Registrar headers
+        if headers:
+            logger.debug(f"Headers: {json.dumps(headers)}")
+        
+        # Registrar payload sin contraseñas
+        safe_payload = json.loads(payload)
+        if "password" in safe_payload:
+            safe_payload["password"] = "********"
+        logger.debug(f"Payload: {json.dumps(safe_payload)}")
+    except Exception as e:
+        logger.error(f"Error en debug_firebase_auth_request: {e}")
+
+
+# --- CHANGE START ---
+def get_firebase_web_api_key():
+    """
+    Obtiene la API key web de Firebase necesaria para autenticación REST.
+    
+    Busca la API key en el siguiente orden de prioridad:
+    1. st.secrets["FIREBASE_WEB_API_KEY"] (mayúsculas)
+    2. st.secrets["firebase_web_api_key"] (minúsculas)
+    3. st.secrets["firebase"]["web_api_key"] (dentro de sección firebase)
+    4. os.environ["FIREBASE_WEB_API_KEY"] (variables de entorno)
+    5. SOLO en modo DEV → FIREBASE_WEB_CONFIG del código base
+
+    Returns:
+        str: API key web de Firebase
+
+    Raises:
+        FirebaseWebAPIKeyMissingError: Si no se encuentra la API key y estamos en producción
+    """
+    try:
+        # Mostrar en debug las claves disponibles en secrets
+        try:
+            available_secrets = list(st.secrets.keys())
+            if "firebase" in available_secrets:
+                firebase_keys = list(st.secrets.firebase.keys())
+                logger.debug(f"Keys disponibles en st.secrets: {available_secrets}")
+                logger.debug(f"Keys disponibles en st.secrets.firebase: {firebase_keys}")
+        except Exception as e:
+            logger.debug(f"No se pudieron listar los secrets: {e}")
+        
+        # Opción 1: Buscar en nivel superior (mayúsculas)
+        try:
+            api_key = st.secrets["FIREBASE_WEB_API_KEY"]
+            logger.info("API key encontrada en secrets como 'FIREBASE_WEB_API_KEY'")
+            return api_key
+        except Exception:
+            logger.debug("No se encontró FIREBASE_WEB_API_KEY en secrets")
+        
+        # Opción 2: Buscar en nivel superior (minúsculas)
+        try:
+            api_key = st.secrets["firebase_web_api_key"]
+            logger.info("API key encontrada en secrets como 'firebase_web_api_key'")
+            return api_key
+        except Exception:
+            logger.debug("No se encontró firebase_web_api_key en secrets")
+        
+        # Opción 3: Buscar dentro de sección firebase
+        try:
+            api_key = st.secrets["firebase"]["web_api_key"]
+            logger.info("API key encontrada dentro de sección firebase como 'web_api_key'")
+            return api_key
+        except Exception:
+            logger.debug("No se encontró web_api_key en firebase secrets")
+        
+        # Opción 4: Buscar en variables de entorno
+        try:
+            api_key = os.environ.get("FIREBASE_WEB_API_KEY")
+            if api_key:
+                logger.info("API key encontrada en variable de entorno FIREBASE_WEB_API_KEY")
+                return api_key
+        except Exception:
+            logger.debug("No se encontró FIREBASE_WEB_API_KEY en variables de entorno")
+        
+        # Opción 5: Usar configuración por defecto SOLO EN DESARROLLO
+        if IS_DEV:
+            try:
+                api_key = DEFAULT_FIREBASE_WEB_CONFIG.get("apiKey")
+                if api_key:
+                    logger.info("API key obtenida de DEFAULT_FIREBASE_WEB_CONFIG (modo desarrollo)")
+                    return api_key
+            except Exception:
+                logger.debug("No se pudo obtener API key de DEFAULT_FIREBASE_WEB_CONFIG")
+        
+        # Si no se encuentra, lanzar excepción
+        error_msg = "Firebase Web API Key no encontrada en ninguna configuración"
+        logger.error(error_msg)
+        
+        if IS_DEV:
+            logger.warning("Ejecutando en modo desarrollo sin API key de Firebase Web")
+            return None
+        else:
+            raise FirebaseWebAPIKeyMissingError(error_msg)
+            
+    except FirebaseWebAPIKeyMissingError:
+        # Propagamos esta excepción específica hacia arriba
+        raise
+    except Exception as e:
+        logger.error(f"Error inesperado al obtener API key web de Firebase: {e}")
+        if not IS_DEV:
+            raise FirebaseWebAPIKeyMissingError(f"Error al obtener API key: {str(e)}")
+        return None
+# --- CHANGE END ---
 
 def login_user(email: str, password: str) -> Dict[str, Any]:
     """
@@ -149,33 +255,32 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             return {"error": "Servicio de autenticación temporalmente no disponible"}
         
         # Obtener API key de Firebase Web
-        api_key = None
         try:
-            # Intenta obtener de secrets de streamlit primero
-            api_key = st.secrets["firebase_web_api_key"]
-        except Exception as e:
-            logger.warning(f"No se encontró firebase_web_api_key en secrets: {e}")
-            # Como fallback, intenta buscarla en la sección firebase
-            try:
-                api_key = st.secrets["firebase"]["web_api_key"]
-            except Exception as e2:
-                logger.warning(f"No se encontró web_api_key en firebase secrets: {e2}")
-                # Último intento: usar la configuración por defecto si está disponible
-                try:
-                    if DEFAULT_FIREBASE_CONFIG.get("apiKey"):
-                        api_key = DEFAULT_FIREBASE_CONFIG.get("apiKey")
-                        logger.info("Usando apiKey de DEFAULT_FIREBASE_CONFIG como fallback")
-                except Exception as e3:
-                    logger.error(f"No se pudo obtener API key de DEFAULT_FIREBASE_CONFIG: {e3}")
-        
-        if not api_key:
-            logger.error("No se encontró Firebase Web API Key en ninguna configuración")
-            return {"error": "Configuración incompleta para autenticación"}
+            api_key = get_firebase_web_api_key()
+            
+            if not api_key:
+                if IS_DEV:
+                    # En desarrollo, permitimos un mensaje de error pero no rompemos
+                    error_msg = "Firebase Web API Key no configurada correctamente. Necesaria para autenticación."
+                    logger.error(error_msg)
+                    return {"error": error_msg}
+                else:
+                    # En producción, esto no debería ocurrir ya que get_firebase_web_api_key lanzaría excepción
+                    error_msg = "Error crítico de configuración: Firebase Web API Key no encontrada"
+                    logger.error(error_msg)
+                    return {"error": error_msg}
+                    
+        except FirebaseWebAPIKeyMissingError as e:
+            error_msg = f"Error de configuración: {str(e)}"
+            logger.error(error_msg)
+            # No registramos esto como fallo en circuit_breaker, es un problema de configuración
+            return {"error": error_msg}
         
         # URL para autenticación con email/password
         auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
         
-        # Datos de la solicitud
+        # --- ACTUALIZACIÓN INICIO ---
+        # Datos de la solicitud - Asegurar el formato correcto
         payload = json.dumps({
             "email": email,
             "password": password,
@@ -185,8 +290,26 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
         # Cabeceras
         headers = {"Content-Type": "application/json"}
         
-        # Realizar solicitud
-        response = requests.post(auth_url, headers=headers, data=payload)
+        # Depurar la solicitud (sin mostrar datos sensibles)
+        debug_firebase_auth_request(api_key, payload, headers)
+        
+        # Realizar solicitud con manejo de errores mejorado
+        try:
+            response = requests.post(auth_url, headers=headers, data=payload, timeout=10)
+            logger.debug(f"Respuesta de Firebase Auth: código {response.status_code}")
+            
+            # Intentar obtener más información si hay error
+            if response.status_code != 200:
+                try:
+                    error_data = response.json()
+                    error_details = error_data.get('error', {})
+                    logger.error(f"Error de Firebase Auth: {error_details}")
+                except Exception:
+                    logger.error(f"Error de Firebase Auth: Código {response.status_code}, cuerpo: {response.text[:100]}...")
+        except requests.RequestException as e:
+            logger.error(f"Error en la solicitud HTTP a Firebase: {str(e)}")
+            return {"error": f"Error de comunicación con Firebase: {str(e)}"}
+        # --- ACTUALIZACIÓN FIN ---
         
         # Verificar respuesta
         if response.status_code == 200:
@@ -232,8 +355,13 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             
             return {"error": friendly_message}
     
+    except FirebaseWebAPIKeyMissingError as e:
+        error_msg = f"Error de configuración: {str(e)}"
+        logger.error(error_msg)
+        # No registramos esto como fallo en circuit_breaker, es un problema de configuración
+        return {"error": error_msg}
     except Exception as e:
-        logger.error(f"Error en login_user: {e}")
+        logger.error(f"Error en login_user: {str(e)}")
         circuit_breaker.record_failure("firebase_auth", error_type="general")
         return {"error": f"Error durante el proceso de login: {str(e)}"}
     
@@ -255,29 +383,29 @@ def create_user(email: str, password: str, user_data: Dict[str, Any]) -> Dict[st
             logger.warning("Circuit breaker abierto para Firebase Auth")
             return {"error": "Servicio de autenticación temporalmente no disponible"}
         
+        # --- CHANGE START ---
         # Obtener API key de Firebase Web
-        api_key = None
         try:
-            # Intenta obtener de secrets de streamlit primero
-            api_key = st.secrets["firebase_web_api_key"]
-        except Exception as e:
-            logger.warning(f"No se encontró firebase_web_api_key en secrets: {e}")
-            # Como fallback, intenta buscarla en la sección firebase
-            try:
-                api_key = st.secrets["firebase"]["web_api_key"]
-            except Exception as e2:
-                logger.warning(f"No se encontró web_api_key en firebase secrets: {e2}")
-                # Último intento: usar la configuración por defecto si está disponible
-                try:
-                    if DEFAULT_FIREBASE_CONFIG.get("apiKey"):
-                        api_key = DEFAULT_FIREBASE_CONFIG.get("apiKey")
-                        logger.info("Usando apiKey de DEFAULT_FIREBASE_CONFIG como fallback")
-                except Exception as e3:
-                    logger.error(f"No se pudo obtener API key de DEFAULT_FIREBASE_CONFIG: {e3}")
-        
-        if not api_key:
-            logger.error("No se encontró Firebase Web API Key en ninguna configuración")
-            return {"error": "Configuración incompleta para crear usuario"}
+            api_key = get_firebase_web_api_key()
+            
+            if not api_key:
+                if IS_DEV:
+                    # En desarrollo, permitimos un mensaje de error pero no rompemos
+                    error_msg = "Firebase Web API Key no configurada correctamente. Necesaria para registro de usuarios."
+                    logger.error(error_msg)
+                    return {"error": error_msg}
+                else:
+                    # En producción, esto no debería ocurrir ya que get_firebase_web_api_key lanzaría excepción
+                    error_msg = "Error crítico de configuración: Firebase Web API Key no encontrada"
+                    logger.error(error_msg)
+                    return {"error": error_msg}
+                    
+        except FirebaseWebAPIKeyMissingError as e:
+            error_msg = f"Error de configuración: {str(e)}"
+            logger.error(error_msg)
+            # No registramos esto como fallo en circuit_breaker, es un problema de configuración
+            return {"error": error_msg}
+        # --- CHANGE END ---
         
         # URL para crear cuenta con email/password
         auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={api_key}"
@@ -349,8 +477,15 @@ def create_user(email: str, password: str, user_data: Dict[str, Any]) -> Dict[st
             
             return {"error": friendly_message}
     
+    # --- CHANGE START ---
+    except FirebaseWebAPIKeyMissingError as e:
+        error_msg = f"Error de configuración: {str(e)}"
+        logger.error(error_msg)
+        # No registramos esto como fallo en circuit_breaker, es un problema de configuración
+        return {"error": error_msg}
+    # --- CHANGE END ---
     except Exception as e:
-        logger.error(f"Error en create_user: {e}")
+        logger.error(f"Error en create_user: {str(e)}")
         circuit_breaker.record_failure("firebase_auth", error_type="general")
         return {"error": f"Error durante el proceso de crear usuario: {str(e)}"}
     
@@ -1043,4 +1178,3 @@ def obtener_historial_consignas(uid: str) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error obteniendo historial de consignas: {e}")
         return []
-    

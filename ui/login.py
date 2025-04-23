@@ -11,7 +11,9 @@ import streamlit as st
 from datetime import datetime
 import re
 
-from core.firebase_client import login_user, create_user, get_user_data
+# --- CHANGE START ---
+from core.firebase_client import login_user, create_user, get_user_data, FirebaseWebAPIKeyMissingError
+# --- CHANGE END ---
 from core.session_manager import set_session_var, init_session_state
 from ui.main_layout import mostrar_mensaje_error
 
@@ -35,6 +37,19 @@ def mostrar_login():
         # Título
         st.markdown("<h2>Iniciar sesión</h2>", unsafe_allow_html=True)
         
+        # --- CHANGE START ---
+        # Verificar si hay un error de configuración Firebase
+        if 'firebase_config_error' in st.session_state and st.session_state['firebase_config_error']:
+            st.error("""
+            ⚠️ **Configuración de Firebase incompleta**
+            
+            No se ha encontrado la clave de API Web de Firebase necesaria para la autenticación.
+            
+            Administrador: Por favor, añade la clave `FIREBASE_WEB_API_KEY` en los secrets de la aplicación 
+            siguiendo la [documentación de Streamlit sobre secrets](https://docs.streamlit.io/library/advanced-features/secrets-management).
+            """)
+        # --- CHANGE END ---
+        
         # Tabs para login y registro
         tab1, tab2 = st.tabs(["Iniciar sesión", "Registrarse"])
         
@@ -54,31 +69,50 @@ def mostrar_login():
                     else:
                         # Intentar login
                         with st.spinner("Iniciando sesión..."):
-                            result = login_user(email, password)
-                            
-                            if result and 'error' not in result:
-                                # Login exitoso, obtener datos del usuario
-                                user_data = get_user_data(result['uid'])
+                            # --- CHANGE START ---
+                            try:
+                                result = login_user(email, password)
                                 
-                                # Guardar info en el estado de sesión
-                                user_info = {
-                                    'uid': result['uid'],
-                                    'email': email,
-                                    **user_data
-                                }
+                                if result and 'error' not in result:
+                                    # Login exitoso, obtener datos del usuario
+                                    user_data = get_user_data(result['uid'])
+                                    
+                                    # Guardar info en el estado de sesión
+                                    user_info = {
+                                        'uid': result['uid'],
+                                        'email': email,
+                                        **user_data
+                                    }
+                                    
+                                    set_session_var('user_info', user_info)
+                                    
+                                    # Mostrar mensaje de éxito
+                                    st.success("¡Login exitoso!")
+                                    
+                                    # Recargar para redirigir a la página principal
+                                    st.rerun()
+                                    return True
+                                else:
+                                    # Login fallido
+                                    error_msg = result.get('error', 'Error al iniciar sesión. Verifica tus credenciales.')
+                                    
+                                    # Verificar si es un error de configuración
+                                    if "Error de configuración" in error_msg:
+                                        set_session_var('firebase_config_error', True)
+                                        st.error(f"{error_msg}\n\nPor favor, contacta al administrador del sistema.")
+                                    else:
+                                        mostrar_mensaje_error(error_msg)
+                            except FirebaseWebAPIKeyMissingError as e:
+                                logger.error(f"Error de configuración Firebase: {str(e)}")
+                                set_session_var('firebase_config_error', True)
+                                st.error(f"""
+                                ⚠️ **Error de configuración Firebase**
                                 
-                                set_session_var('user_info', user_info)
+                                {str(e)}
                                 
-                                # Mostrar mensaje de éxito
-                                st.success("¡Login exitoso!")
-                                
-                                # Recargar para redirigir a la página principal
-                                st.rerun()
-                                return True
-                            else:
-                                # Login fallido
-                                error_msg = result.get('error', 'Error al iniciar sesión. Verifica tus credenciales.')
-                                mostrar_mensaje_error(error_msg)
+                                Por favor, contacta al administrador del sistema para configurar correctamente las credenciales.
+                                """)
+                            # --- CHANGE END ---
         
         with tab2:
             # Formulario de registro
@@ -134,28 +168,47 @@ def mostrar_login():
                                 'ultimo_login': datetime.now().isoformat()
                             }
                             
-                            result = create_user(email, password, user_data)
-                            
-                            if result and 'error' not in result:
-                                # Registro exitoso, guardar info en el estado de sesión
-                                user_info = {
-                                    'uid': result['uid'],
-                                    'email': email,
-                                    **user_data
-                                }
+                            # --- CHANGE START ---
+                            try:
+                                result = create_user(email, password, user_data)
                                 
-                                set_session_var('user_info', user_info)
+                                if result and 'error' not in result:
+                                    # Registro exitoso, guardar info en el estado de sesión
+                                    user_info = {
+                                        'uid': result['uid'],
+                                        'email': email,
+                                        **user_data
+                                    }
+                                    
+                                    set_session_var('user_info', user_info)
+                                    
+                                    # Mostrar mensaje de éxito
+                                    st.success("¡Cuenta creada exitosamente!")
+                                    
+                                    # Recargar para redirigir a la página principal
+                                    st.rerun()
+                                    return True
+                                else:
+                                    # Registro fallido
+                                    error_msg = result.get('error', 'Error al crear la cuenta. Inténtalo de nuevo.')
+                                    
+                                    # Verificar si es un error de configuración
+                                    if "Error de configuración" in error_msg:
+                                        set_session_var('firebase_config_error', True)
+                                        st.error(f"{error_msg}\n\nPor favor, contacta al administrador del sistema.")
+                                    else:
+                                        mostrar_mensaje_error(error_msg)
+                            except FirebaseWebAPIKeyMissingError as e:
+                                logger.error(f"Error de configuración Firebase: {str(e)}")
+                                set_session_var('firebase_config_error', True)
+                                st.error(f"""
+                                ⚠️ **Error de configuración Firebase**
                                 
-                                # Mostrar mensaje de éxito
-                                st.success("¡Cuenta creada exitosamente!")
+                                {str(e)}
                                 
-                                # Recargar para redirigir a la página principal
-                                st.rerun()
-                                return True
-                            else:
-                                # Registro fallido
-                                error_msg = result.get('error', 'Error al crear la cuenta. Inténtalo de nuevo.')
-                                mostrar_mensaje_error(error_msg)
+                                Por favor, contacta al administrador del sistema para configurar correctamente las credenciales.
+                                """)
+                            # --- CHANGE END ---
         
         # Opción para continuar sin cuenta
         st.markdown("""
@@ -195,6 +248,21 @@ def mostrar_login():
             """)
         
         return False
+    # --- CHANGE START ---
+    except FirebaseWebAPIKeyMissingError as e:
+        logger.error(f"Error de configuración Firebase: {str(e)}")
+        # Marcar error de configuración
+        set_session_var('firebase_config_error', True)
+        # Mostrar mensaje de error claro
+        st.error(f"""
+        ⚠️ **Error de configuración Firebase**
+        
+        {str(e)}
+        
+        Por favor, contacta al administrador del sistema para configurar correctamente las credenciales.
+        """)
+        return False
+    # --- CHANGE END ---
     except Exception as e:
         logger.error(f"Error mostrando login: {str(e)}")
         # Mostrar error y devolver False

@@ -1,3 +1,4 @@
 # Archivos sensibles
 .env
 .streamlit/secrets.toml
+firebase-credentials.json

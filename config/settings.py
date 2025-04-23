@@ -6,6 +6,13 @@ Configuración global
 Este módulo contiene configuraciones y constantes globales para toda la aplicación.
 """
 
+import os
+
+# --- CHANGE START ---
+# Verificación de entorno de desarrollo
+IS_DEV = bool(os.getenv("DEV_MODE", False))
+# --- CHANGE END ---
+
 # Información de la aplicación
 APP_NAME = "Textocorrector ELE"
 APP_VERSION = "1.0.0"
@@ -53,6 +60,19 @@ FIREBASE_CONFIG = {
     "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
     "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk%40textocorrector-ele.iam.gserviceaccount.com"
 }
+
+# Configuración de Firebase Web (para autenticación)
+# --- CHANGE START ---
+# Esta configuración solo debe usarse en entorno de desarrollo
+FIREBASE_WEB_CONFIG = {
+    "apiKey": "AIzaSyBcxIiPx0QxBx0gRP7M9XpbKzy_zWqYo0Y",
+    "authDomain": "spanish-factoria.firebaseapp.com",
+    "projectId": "spanish-factoria",
+    "storageBucket": "spanish-factoria.appspot.com",
+    "messagingSenderId": "123456789012",
+    "appId": "1:123456789012:web:abc123def456"
+}
+# --- CHANGE END ---
 
 # Configuración del circuit breaker
 CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3  # Número de fallos antes de abrir el circuito
