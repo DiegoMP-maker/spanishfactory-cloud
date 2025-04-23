@@ -49,48 +49,31 @@ def configurar_sidebar():
             # Obtener página actual
             current_page = get_session_var("current_page", "correccion")
             
-            # Botones de navegación
-            if st.sidebar.button("🖊️ Corrección de textos", 
-                                type="primary" if current_page == "correccion" else "secondary"):
-                set_session_var("current_page", "correccion")
-                return "correccion"
+            # Definir las páginas disponibles
+            pages = {
+                "correccion": "🖊️ Corrección de textos",
+                "ejercicios": "📝 Ejercicios personalizados",
+                "simulacro": "🏆 Simulacro de examen",
+                "herramientas": "🛠️ Herramientas ELE",
+                "perfil": "👤 Mi perfil y progreso",
+                "plan": "📚 Plan de estudio",
+                "about": "ℹ️ Acerca de"
+            }
             
-            if st.sidebar.button("📝 Ejercicios personalizados",
-                                type="primary" if current_page == "ejercicios" else "secondary"):
-                set_session_var("current_page", "ejercicios")
-                return "ejercicios"
+            # Crear los botones de navegación de forma optimizada
+            for page_id, page_title in pages.items():
+                button_type = "primary" if current_page == page_id else "secondary"
+                if st.sidebar.button(page_title, type=button_type, key=f"btn_{page_id}"):
+                    if current_page != page_id:
+                        set_session_var("current_page", page_id)
+                        # Usar st.rerun() para recargar la página
+                        st.rerun()
+                    return page_id
             
-            if st.sidebar.button("🏆 Simulacro de examen",
-                                type="primary" if current_page == "simulacro" else "secondary"):
-                set_session_var("current_page", "simulacro")
-                return "simulacro"
-            
-            if st.sidebar.button("🛠️ Herramientas ELE",
-                                type="primary" if current_page == "herramientas" else "secondary"):
-                set_session_var("current_page", "herramientas")
-                return "herramientas"
-            
-            if st.sidebar.button("👤 Mi perfil y progreso",
-                                type="primary" if current_page == "perfil" else "secondary"):
-                set_session_var("current_page", "perfil")
-                return "perfil"
-            
-            if st.sidebar.button("📚 Plan de estudio",
-                                type="primary" if current_page == "plan" else "secondary"):
-                set_session_var("current_page", "plan")
-                return "plan"
-            
-            # Separador
+            # Separador final
             st.markdown("---")
-            
-            # Botón Acerca de
-            if st.sidebar.button("ℹ️ Acerca de",
-                                type="primary" if current_page == "about" else "secondary"):
-                set_session_var("current_page", "about")
-                return "about"
             
             # Botón cerrar sesión
-            st.markdown("---")
             mostrar_logout()
             
             # Mostrar información de contacto

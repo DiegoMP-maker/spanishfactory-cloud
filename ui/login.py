@@ -73,7 +73,7 @@ def mostrar_login():
                                 st.success("¡Login exitoso!")
                                 
                                 # Recargar para redirigir a la página principal
-                                st.experimental_rerun()
+                                st.rerun()
                                 return True
                             else:
                                 # Login fallido
@@ -150,7 +150,7 @@ def mostrar_login():
                                 st.success("¡Cuenta creada exitosamente!")
                                 
                                 # Recargar para redirigir a la página principal
-                                st.experimental_rerun()
+                                st.rerun()
                                 return True
                             else:
                                 # Registro fallido
@@ -179,7 +179,7 @@ def mostrar_login():
             set_session_var('user_info', user_info)
             
             # Recargar para redirigir a la página principal
-            st.experimental_rerun()
+            st.rerun()
             return True
         
         # Información adicional
@@ -215,7 +215,7 @@ def mostrar_logout():
                 del st.session_state[key]
             
             # Recargar para volver a la pantalla de login
-            st.experimental_rerun()
+            st.rerun()
             return True
         
         return False

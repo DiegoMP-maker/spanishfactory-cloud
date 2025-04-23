@@ -170,3 +170,38 @@ def circuit_breaker(service_name="default", failure_threshold=None, recovery_tim
         return wrapper
     
     return decorator
+
+# Crear una instancia global del Circuit Breaker para uso en la aplicación
+circuit_breaker = CircuitBreaker("global_circuit_breaker")
+
+def retry_with_backoff(func, max_retries=3, initial_delay=1, backoff_factor=2):
+    """
+    Ejecuta una función con reintentos usando backoff exponencial.
+    
+    Args:
+        func: Función a ejecutar
+        max_retries: Número máximo de reintentos
+        initial_delay: Tiempo inicial de espera entre reintentos (segundos)
+        backoff_factor: Factor para aumentar el tiempo de espera
+        
+    Returns:
+        Result: Resultado de la función o levanta la última excepción
+    """
+    last_exception = None
+    delay = initial_delay
+    
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            last_exception = e
+            logger.warning(f"Intento {attempt+1}/{max_retries} falló: {str(e)}")
+            
+            if attempt < max_retries - 1:
+                logger.info(f"Esperando {delay}s antes de reintentar...")
+                time.sleep(delay)
+                delay *= backoff_factor
+    
+    # Si llegamos aquí, todos los intentos fallaron
+    logger.error(f"Todos los reintentos fallaron: {str(last_exception)}")
+    raise last_exception

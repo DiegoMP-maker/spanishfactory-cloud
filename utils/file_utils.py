@@ -347,9 +347,10 @@ def get_app_file_path(relative_path):
         str: Ruta absoluta
     """
     try:
-        # Obtener directorio base de la aplicación
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base_dir, relative_path)
+        # Obtener directorio base de la aplicación usando pathlib
+        from pathlib import Path
+        base_dir = Path(__file__).resolve().parent.parent
+        return str(base_dir / relative_path)
     except Exception as e:
         logger.error(f"Error obteniendo ruta de archivo: {str(e)}")
         return relative_path

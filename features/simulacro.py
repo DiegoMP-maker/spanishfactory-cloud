@@ -11,7 +11,7 @@ utilizando el Asistente de OpenAI para crear tareas realistas de expresión escr
 import logging
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple
 
 import streamlit as st
@@ -170,52 +170,64 @@ def iniciar_simulacro(nivel_examen: str, duracion_minutos: int) -> Tuple[Dict[st
         logger.error(f"Error al iniciar simulacro: {str(e)}")
         return {"error": str(e), "tarea": "Error al iniciar el simulacro"}, False
 
-def calcular_tiempo_restante(inicio_timestamp: float, duracion_minutos: int) -> Dict[str, Any]:
+def mostrar_temporizador(tiempo_fin):
     """
-    Calcula el tiempo restante para un simulacro en curso.
+    Muestra un temporizador con el tiempo restante.
     
     Args:
-        inicio_timestamp: Timestamp de inicio del simulacro
-        duracion_minutos: Duración del simulacro en minutos
+        tiempo_fin (str): Tiempo de finalización en formato ISO
         
     Returns:
-        dict: Estado del temporizador
+        None
     """
-    # Manejar el caso donde duracion_minutos es None
-    if duracion_minutos is None:
-        duracion_minutos = 0
-    
-    # Calcular tiempo total en segundos
-    duracion_total_segundos = duracion_minutos * 60
-    
-    # Calcular tiempo transcurrido
-    tiempo_transcurrido = time.time() - inicio_timestamp
-    tiempo_restante_segundos = max(0, duracion_total_segundos - tiempo_transcurrido)
-    
-    # Formatear tiempo restante
-    minutos = int(tiempo_restante_segundos // 60)
-    segundos = int(tiempo_restante_segundos % 60)
-    tiempo_formateado = f"{minutos:02d}:{segundos:02d}"
-    
-    # Calcular porcentaje (evitar división por cero)
-    porcentaje = 1 - (tiempo_restante_segundos / duracion_total_segundos) if duracion_total_segundos > 0 else 1
-    porcentaje = max(0, min(1, porcentaje))  # Asegurar entre 0 y 1
-    
-    # Determinar color según tiempo restante
-    if tiempo_restante_segundos > duracion_total_segundos * 0.5:  # Más del 50% restante
-        color = "normal"  # Verde/Normal
-    elif tiempo_restante_segundos > duracion_total_segundos * 0.25:  # Entre 25% y 50%
-        color = "warning"  # Amarillo/Advertencia
-    else:  # Menos del 25%
-        color = "error"  # Rojo/Error
-    
-    return {
-        "tiempo_restante": tiempo_restante_segundos,
-        "tiempo_formateado": tiempo_formateado,
-        "porcentaje": porcentaje,
-        "color": color,
-        "terminado": tiempo_restante_segundos <= 0
-    }
+    try:
+        # Convertir tiempo de finalización a datetime
+        tiempo_fin_dt = datetime.fromisoformat(tiempo_fin.replace('Z', '+00:00'))
+        
+        # Calcular tiempo restante
+        tiempo_actual = datetime.now()
+        tiempo_restante = tiempo_fin_dt - tiempo_actual
+        
+        # Formatear tiempo restante
+        if tiempo_restante.total_seconds() <= 0:
+            # Tiempo agotado
+            st.error("¡Tiempo agotado! Por favor, finaliza y envía tu examen.")
+            return
+        
+        # Calcular horas, minutos y segundos
+        horas = int(tiempo_restante.total_seconds() // 3600)
+        minutos = int((tiempo_restante.total_seconds() % 3600) // 60)
+        segundos = int(tiempo_restante.total_seconds() % 60)
+        
+        # Crear un contenedor único para el temporizador para evitar recrear toda la UI
+        timer_placeholder = st.empty()
+        
+        # Mostrar temporizador en el contenedor
+        timer_placeholder.markdown(f"""
+        <div class="timer-box">
+            <p>Tiempo restante:</p>
+            <div class="timer">{horas:02d}:{minutos:02d}:{segundos:02d}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Programar la siguiente actualización para evitar recargas constantes
+        # Solo actualizamos la UI completa cada 10 segundos para reducir la carga
+        if segundos % 10 == 0 and not st.session_state.get("rerun_scheduled", False):
+            st.session_state.rerun_scheduled = True
+            
+            # Usamos un callback para recargar después de cierto tiempo
+            def schedule_rerun():
+                time.sleep(10)  # Esperar 10 segundos
+                st.session_state.rerun_scheduled = False
+                st.rerun()
+            
+            # Iniciar el callback en un hilo
+            import threading
+            threading.Thread(target=schedule_rerun, daemon=True).start()
+            
+    except Exception as e:
+        logger.error(f"Error mostrando temporizador: {str(e)}")
+        st.error(f"Error en el temporizador: {str(e)}")
 
 def finalizar_simulacro(respuesta: str, tarea: str, nivel: str) -> Dict[str, Any]:
     """
@@ -343,17 +355,22 @@ def finalizar_simulacro(respuesta: str, tarea: str, nivel: str) -> Dict[str, Any
         
         # También guardar en Firebase si está disponible
         try:
-            from core.firebase_client import initialize_firebase
-            db, success = initialize_firebase()
-            
-            if success and db:
-                uid = get_session_var("uid_usuario", "")
-                if uid:
-                    # Guardar en colección de simulacros del usuario
-                    import uuid
-                    simulacro_id = str(uuid.uuid4())
-                    db.collection("usuarios").document(uid).collection("simulacros").document(simulacro_id).set(nuevo_registro)
-                    logger.info(f"Simulacro guardado en Firebase para usuario {uid}")
+            from core.firebase_client import guardar_resultado_simulacro
+            uid = get_session_var("uid_usuario", "")
+            if uid:
+                # Preparar datos para guardar
+                datos_guardar = {
+                    "uid": uid,
+                    "nivel": nivel,
+                    "fecha": datetime.now().isoformat(),
+                    "tarea": tarea,
+                    "respuesta": respuesta,
+                    "resultado": data_json,
+                    "calificacion": data_json.get("calificacion", 0),
+                    "apto": data_json.get("apto", False)
+                }
+                guardar_resultado_simulacro(datos_guardar)
+                logger.info(f"Simulacro guardado en Firebase para usuario {uid}")
         except Exception as firebase_error:
             logger.error(f"Error al guardar simulacro en Firebase: {str(firebase_error)}")
             # Continuar sin guardar en Firebase
@@ -374,4 +391,3 @@ def finalizar_simulacro(respuesta: str, tarea: str, nivel: str) -> Dict[str, Any
             "error": str(e),
             "evaluacion": f"Error al evaluar la respuesta: {str(e)}"
         }
-    

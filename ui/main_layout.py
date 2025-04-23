@@ -446,6 +446,14 @@ def mostrar_leyenda_errores():
                 <span class="leyenda-color" style="background-color: #fff2cc;"></span>
                 <span>Puntuación</span>
             </div>
+            <div class="leyenda-item">
+                <span class="leyenda-color" style="background-color: #f9d9ff;"></span>
+                <span>Registro lingüístico</span>
+            </div>
+            <div class="leyenda-item">
+                <span class="leyenda-color" style="background-color: #f0f0f0;"></span>
+                <span>Otro</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
     except Exception as e:

@@ -10,6 +10,7 @@ import logging
 import re
 import unicodedata
 import html
+import json
 from typing import List, Dict, Any, Tuple, Optional
 
 logger = logging.getLogger(__name__)
@@ -327,8 +328,6 @@ def extract_errores_from_json(json_str: str) -> List[Dict[str, Any]]:
     Returns:
         list: Lista de errores estructurados
     """
-    import json
-    
     try:
         if not json_str:
             return []
@@ -458,8 +457,6 @@ def parse_ejercicio_structure(raw_data: str) -> Dict[str, Any]:
     Returns:
         dict: Estructura del ejercicio parseada
     """
-    import json
-    
     try:
         # Intentar parsear directamente como JSON
         try:
@@ -505,8 +502,6 @@ def parse_simulacro_structure(raw_data: str) -> Dict[str, Any]:
     Returns:
         dict: Estructura del simulacro parseada
     """
-    import json
-    
     try:
         # Intentar parsear directamente como JSON
         try:
@@ -522,6 +517,16 @@ def parse_simulacro_structure(raw_data: str) -> Dict[str, Any]:
         
         if start_idx >= 0 and end_idx > start_idx:
             json_str = raw_data[start_idx:end_idx+1]
+            try:
+                data = json.loads(json_str)
+                return data
+            except json.JSONDecodeError:
+                pass
+        
+        # Buscar JSON dentro de bloques de código
+        json_match = re.search(r'```json\s*(.*?)\s*```', raw_data, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
             try:
                 data = json.loads(json_str)
                 return data
