@@ -4,4 +4,26 @@
 firebase-credentials.json
 .venv/
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pip/
+*.sqlite3
+*.db
+*.bak
+*.log
+*.tmp
+*.swp
+data/
+datasets/
+outputs/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.avi
+.vscode/*
+.idea/
 
+node_modules
