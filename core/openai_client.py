@@ -13,11 +13,11 @@ import json
 import logging
 import requests
 import traceback
-from typing import Optional, Dict, Any, Tuple, List
 
 import streamlit as st
-from openai import OpenAI
 
+# Importar la función centralizada para crear clientes OpenAI
+from core.openai_utils import create_openai_client, get_openai_api_key
 from core.circuit_breaker import circuit_breaker, retry_with_backoff
 from config.settings import (
     DEFAULT_OPENAI_MODEL, DEFAULT_TIMEOUT, MAX_RETRIES, 
@@ -26,27 +26,14 @@ from config.settings import (
 
 logger = logging.getLogger(__name__)
 
-def get_api_key() -> Optional[str]:
-    """
-    Obtiene la API key de OpenAI desde los secrets de Streamlit.
-
-    Returns:
-        str: API key o None si no está configurada
-    """
-    try:
-        return st.secrets["OPENAI_API_KEY"]
-    except Exception as e:
-        logger.warning(f"Error al obtener API Key de OpenAI: {e}")
-        return None
-
-def list_available_openai_models() -> List[str]:
+def list_available_openai_models():
     """
     Lista todos los modelos disponibles de OpenAI.
 
     Returns:
         list: Lista de nombres de modelos disponibles o lista por defecto
     """
-    api_key = get_api_key()
+    api_key = get_openai_api_key()
     if api_key is None:
         logger.warning("API key de OpenAI no configurada")
         return []
@@ -91,7 +78,7 @@ def list_available_openai_models() -> List[str]:
         # Devolver lista por defecto en caso de error
         return ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"]
 
-def get_best_openai_model(priorizar_costo=True) -> str:
+def get_best_openai_model(priorizar_costo=True):
     """
     Determina el mejor modelo OpenAI disponible basado en prioridades.
     Puede priorizar costo o capacidad según necesidades.
@@ -125,14 +112,14 @@ def get_best_openai_model(priorizar_costo=True) -> str:
     # Si ninguno de los preferidos está disponible, usar el primero de la lista
     return available_models[0]
 
-def configure_openai() -> Tuple[Optional[str], bool]:
+def configure_openai():
     """
     Configura el cliente de OpenAI con la API key y verifica la conexión.
 
     Returns:
         tuple: (modelo_seleccionado, éxito_configuración)
     """
-    api_key = get_api_key()
+    api_key = get_openai_api_key()
     if api_key is None:
         logger.warning("API key de OpenAI no configurada")
         return None, False
@@ -200,7 +187,7 @@ def configure_openai() -> Tuple[Optional[str], bool]:
         circuit_breaker.record_failure("openai", error_type="generic")
         return None, False
 
-def get_completion_direct(system_msg: str, user_msg: str, model: str = None, max_retries: int = MAX_RETRIES) -> Tuple[Optional[str], Dict[str, Any]]:
+def get_completion_direct(system_msg, user_msg, model=None, max_retries=MAX_RETRIES):
     """
     Obtiene una respuesta directamente de la API de OpenAI (sin usar Assistants).
     
@@ -213,7 +200,7 @@ def get_completion_direct(system_msg: str, user_msg: str, model: str = None, max
     Returns:
         tuple: (respuesta_texto, datos_json_si_disponibles)
     """
-    api_key = get_api_key()
+    api_key = get_openai_api_key()
     if api_key is None:
         return None, {"error": "API de OpenAI no configurada"}
 
@@ -235,8 +222,10 @@ def get_completion_direct(system_msg: str, user_msg: str, model: str = None, max
 
     for attempt in range(max_retries):
         try:
-            # Configurar cliente OpenAI
-            client = OpenAI(api_key=api_key)
+            # Configurar cliente OpenAI usando la función centralizada
+            client = create_openai_client(api_key=api_key)
+            if not client:
+                return None, {"error": "No se pudo crear el cliente OpenAI"}
             
             # Llamada a la API de OpenAI
             response = client.chat.completions.create(
@@ -309,7 +298,7 @@ def get_completion_direct(system_msg: str, user_msg: str, model: str = None, max
     # Este punto no debería alcanzarse nunca, pero por si acaso
     return None, {"error": "Error inesperado en get_completion_direct"}
 
-def generar_imagen_dalle(tema: str, nivel: str) -> Tuple[Optional[str], str]:
+def generar_imagen_dalle(tema, nivel):
     """
     Genera una imagen utilizando DALL-E basada en un tema y adaptada al nivel del estudiante.
     
@@ -320,7 +309,7 @@ def generar_imagen_dalle(tema: str, nivel: str) -> Tuple[Optional[str], str]:
     Returns:
         tuple: (URL de la imagen generada, descripción de la imagen)
     """
-    api_key = get_api_key()
+    api_key = get_openai_api_key()
     if api_key is None:
         return None, "API de DALL-E no disponible"
 
@@ -339,8 +328,10 @@ def generar_imagen_dalle(tema: str, nivel: str) -> Tuple[Optional[str], str]:
     prompt = f"Una escena {complejidad} sobre {tema}. La imagen debe ser clara, bien iluminada, y adecuada para describir en español."
 
     try:
-        # Configurar client para OpenAI
-        client = OpenAI(api_key=api_key)
+        # Configurar client para OpenAI usando la función centralizada
+        client = create_openai_client(api_key=api_key)
+        if not client:
+            return None, "No se pudo crear el cliente OpenAI"
         
         # Función para envío de solicitud con timeout adaptativo
         def generate_image():
@@ -391,7 +382,7 @@ def generar_imagen_dalle(tema: str, nivel: str) -> Tuple[Optional[str], str]:
         circuit_breaker.record_failure("dalle", error_type="general")
         return None, f"Error: {str(e)}"
 
-def transcribir_imagen_texto(imagen_bytes, idioma="es") -> str:
+def transcribir_imagen_texto(imagen_bytes, idioma="es"):
     """
     Transcribe texto manuscrito de una imagen utilizando la API de OpenAI.
     
@@ -402,7 +393,7 @@ def transcribir_imagen_texto(imagen_bytes, idioma="es") -> str:
     Returns:
         str: Texto transcrito o mensaje de error
     """
-    api_key = get_api_key()
+    api_key = get_openai_api_key()
     if api_key is None:
         return "Error: API de OpenAI no disponible"
 
@@ -418,8 +409,10 @@ def transcribir_imagen_texto(imagen_bytes, idioma="es") -> str:
         import base64
         encoded_image = base64.b64encode(imagen_bytes).decode('utf-8')
         
-        # Configurar cliente OpenAI
-        client = OpenAI(api_key=api_key)
+        # Configurar cliente OpenAI usando la función centralizada
+        client = create_openai_client(api_key=api_key)
+        if not client:
+            return "Error: No se pudo crear el cliente OpenAI"
         
         # Función para enviar solicitud con reintentos
         def send_vision_request():
@@ -465,7 +458,7 @@ def transcribir_imagen_texto(imagen_bytes, idioma="es") -> str:
         
         return f"Error en la transcripción: {str(e)}"
 
-def generar_audio_elevenlabs(texto: str) -> Optional[bytes]:
+def generar_audio_elevenlabs(texto):
     """
     Genera un archivo de audio a partir del texto usando ElevenLabs.
     

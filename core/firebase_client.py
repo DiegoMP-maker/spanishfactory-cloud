@@ -892,6 +892,43 @@ def get_ejercicios_usuario(uid: str) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error obteniendo ejercicios: {e}")
         return []
+    
+def obtener_historial_correcciones(uid):
+    """
+    Obtiene el historial de correcciones de un usuario.
+    
+    Args:
+        uid (str): ID del usuario
+        
+    Returns:
+        list: Lista de correcciones o lista vacía en caso de error
+    """
+    try:
+        if not uid:
+            return []
+        
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            return []
+        
+        # Obtener correcciones
+        correcciones_ref = db.collection(FIREBASE_COLLECTION_USERS).document(uid) \
+                            .collection(FIREBASE_COLLECTION_CORRECTIONS) \
+                            .order_by("fecha", direction=firestore.Query.DESCENDING)
+        
+        correcciones = []
+        for doc in correcciones_ref.stream():
+            correccion = doc.to_dict()
+            correccion["id"] = doc.id
+            correcciones.append(correccion)
+        
+        return correcciones
+    
+    except Exception as e:
+        logger.error(f"Error obteniendo correcciones: {e}")
+        return []
 
 def guardar_correccion_firebase(datos: Dict[str, Any]) -> bool:
     """
@@ -930,6 +967,47 @@ def guardar_correccion_firebase(datos: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error(f"Error guardando corrección: {e}")
         return False
+    
+# Añadir después de la función guardar_correccion_firebase que ya existe
+
+def guardar_correccion_firebase(datos):
+    """
+    Guarda datos de una corrección en Firebase.
+    
+    Args:
+        datos: Datos de la corrección
+        
+    Returns:
+        bool: True si se guardó correctamente, False en caso contrario
+    """
+    try:
+        # Obtener UID
+        uid = datos.get("uid")
+        if not uid:
+            logger.warning("UID vacío en guardar_correccion_firebase")
+            return False
+        
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            logger.error("No se pudo inicializar Firebase")
+            return False
+        
+        # Guardar en Firestore
+        coleccion_ref = db.collection(FIREBASE_COLLECTION_USERS).document(uid) \
+                          .collection(FIREBASE_COLLECTION_CORRECTIONS)
+                          
+        # Añadir documento sin ID específico
+        coleccion_ref.add(datos)
+        
+        logger.info(f"Corrección guardada para usuario {uid}")
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error guardando corrección: {e}")
+        return False
+    
 
 def guardar_resultado_simulacro(datos: Dict[str, Any]) -> bool:
     """
@@ -1178,3 +1256,116 @@ def obtener_historial_consignas(uid: str) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error obteniendo historial de consignas: {e}")
         return []
+    
+def actualizar_conteo_errores(uid, nuevos_errores):
+    """
+    Actualiza el conteo de errores por tipo para un usuario.
+    Utiliza una transacción de Firestore para garantizar actualizaciones atómicas.
+    
+    Args:
+        uid (str): ID del usuario
+        nuevos_errores (dict): Diccionario con conteo de nuevos errores por tipo
+        
+    Returns:
+        bool: True si la actualización fue exitosa, False en caso contrario
+    """
+    import datetime
+    
+    try:
+        if not uid:
+            logger.warning("UID vacío en actualizar_conteo_errores")
+            return False
+        
+        # Verificar nuevos_errores
+        if not isinstance(nuevos_errores, dict):
+            logger.warning(f"El parámetro nuevos_errores debe ser un diccionario, no {type(nuevos_errores)}")
+            return False
+            
+        # Normalizar keys a lowercase
+        errores_normalizados = {}
+        for key, value in nuevos_errores.items():
+            # Convertir clave a minúsculas
+            key_norm = key.lower()
+            # Mapeo de claves
+            if 'gram' in key_norm:
+                key_norm = 'gramatica'
+            elif 'lex' in key_norm or 'vocab' in key_norm:
+                key_norm = 'lexico'
+            elif 'estil' in key_norm:
+                key_norm = 'estilo'
+            elif 'puntu' in key_norm:
+                key_norm = 'puntuacion'
+            elif 'estruct' in key_norm:
+                key_norm = 'estructura_textual'
+                
+            # Asegurar que el valor es un entero
+            try:
+                value_int = int(value)
+                errores_normalizados[key_norm] = value_int
+            except (ValueError, TypeError):
+                logger.warning(f"Valor no numérico para errores: {key}={value}")
+        
+        # Si no hay errores válidos, salir
+        if not errores_normalizados:
+            logger.warning("No se encontraron errores válidos para actualizar")
+            return False
+            
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            logger.error("No se pudo inicializar Firebase")
+            return False
+        
+        # Referencia al documento del usuario
+        doc_ref = db.collection(FIREBASE_COLLECTION_USERS).document(uid)
+        
+        # Realizar actualización en una transacción
+        @firestore.transactional
+        def actualizar_en_transaccion(transaction, ref):
+            # Obtener documento actual
+            doc = ref.get(transaction=transaction)
+            
+            if not doc.exists:
+                logger.warning(f"No existe documento para usuario {uid}")
+                return False
+            
+            # Obtener datos actuales
+            user_data = doc.to_dict()
+            
+            # Inicializar o obtener estructura de errores
+            errores_actuales = user_data.get("errores_por_tipo", {})
+            
+            # Actualizar contadores para cada tipo de error
+            for tipo, cantidad in errores_normalizados.items():
+                if tipo not in errores_actuales:
+                    errores_actuales[tipo] = 0
+                    
+                errores_actuales[tipo] += cantidad
+            
+            # Actualizar número de correcciones
+            num_correcciones = user_data.get("numero_correcciones", 0) + 1
+            
+            # Preparar datos a actualizar
+            datos_actualizados = {
+                "errores_por_tipo": errores_actuales,
+                "numero_correcciones": num_correcciones,
+                "ultima_correccion": datetime.datetime.now().isoformat()
+            }
+            
+            # Ejecutar actualización
+            transaction.update(ref, datos_actualizados)
+            logger.info(f"Actualizado conteo de errores para usuario {uid}: {errores_normalizados}")
+            
+            return True
+        
+        # Ejecutar la transacción
+        transaction = db.transaction()
+        resultado = actualizar_en_transaccion(transaction, doc_ref)
+        
+        return resultado
+        
+    except Exception as e:
+        logger.error(f"Error actualizando conteo de errores: {e}")
+        return False
+    

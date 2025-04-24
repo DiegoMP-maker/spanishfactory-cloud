@@ -24,6 +24,14 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Limpiar clientes OpenAI de session_state al iniciar
+from core.openai_utils import clean_openai_clients_from_session
+
+# Verifica si ya se ha limpiado en esta sesión
+if 'clients_cleaned' not in st.session_state:
+    clean_openai_clients_from_session()
+    st.session_state.clients_cleaned = True
+
 # Importar componentes principales
 from ui.main_layout import crear_layout_principal, mostrar_pie_pagina
 from ui.sidebar import configurar_sidebar
@@ -41,7 +49,7 @@ def render_ejercicios():
 def render_simulacro():
     st.markdown("## 🏆 Simulacro de examen")
     st.info("La vista de simulacro de examen está en desarrollo. Estará disponible pronto.")
-
+    
 def render_herramientas():
     st.markdown("## 🛠️ Herramientas ELE")
     st.info("La vista de herramientas está en desarrollo. Estará disponible pronto.")

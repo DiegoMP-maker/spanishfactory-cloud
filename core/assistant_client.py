@@ -24,6 +24,7 @@ from typing import Tuple, Dict, Any, List, Optional, Union
 # Finalmente importaciones del proyecto
 from config.settings import MAX_RETRIES, DEFAULT_TIMEOUT, OPENAI_MODELS_PREFERIDOS_CAPACIDAD
 from core.circuit_breaker import circuit_breaker, retry_with_backoff
+from core.openai_utils import clean_openai_clients_from_session
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -43,69 +44,57 @@ def extract_json_from_content(content):
     if not content:
         return None
     
-    # Eliminar marcas de código y texto que no forme parte del JSON
+    # Lista para almacenar posibles cadenas JSON
+    json_candidates = []
+    
     try:
-        # Patrón para extraer JSON entre comillas triples
-        triple_quotes_pattern = r'```(?:json)?\s*([\s\S]*?)```'
-        json_matches = re.findall(triple_quotes_pattern, content)
+        # 1. Estrategia 1: Buscar JSON en bloques de código Markdown
+        json_code_blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)```', content)
+        for block in json_code_blocks:
+            json_candidates.append(block.strip())
         
-        # Patrón alternativo para JSON entre llaves (más agresivo, puede capturar texto no válido)
-        if not json_matches:
-            brace_pattern = r'(\{[\s\S]*\})'
-            json_matches = re.findall(brace_pattern, content)
+        # 2. Estrategia 2: Buscar JSON delimitado por llaves
+        # Esta es una búsqueda más agresiva que puede extraer JSON en texto plano
+        if not json_candidates:
+            # Buscar todos los pares de llaves balanceados
+            stack = []
+            start_indices = []
+            
+            for i, char in enumerate(content):
+                if char == '{':
+                    if len(stack) == 0:  # Inicio de un posible objeto JSON
+                        start_indices.append(i)
+                    stack.append('{')
+                elif char == '}' and stack:
+                    stack.pop()
+                    if len(stack) == 0:  # Fin de un posible objeto JSON
+                        start_idx = start_indices.pop() if start_indices else -1
+                        if start_idx != -1:
+                            json_candidates.append(content[start_idx:i+1])
         
-        # Probar cada coincidencia hasta encontrar JSON válido
-        for match in json_matches:
+        # 3. Estrategia 3: Intento directo (por si el contenido es directamente JSON)
+        json_candidates.append(content.strip())
+        
+        # Probar cada candidato
+        for candidate in json_candidates:
             try:
-                # Limpiar la cadena
-                clean_json = match.strip()
-                data = json.loads(clean_json)
-                return data
+                parsed_json = json.loads(candidate)
+                return parsed_json
             except json.JSONDecodeError:
                 continue
         
-        # Si no se encontró JSON válido hasta ahora, intentar con el texto completo
-        try:
-            # Algunos modelos pueden devolver JSON sin marcadores
-            data = json.loads(content.strip())
-            return data
-        except json.JSONDecodeError:
-            pass
-        
-        # Intentar una extracción más agresiva buscando el primer { y último }
-        try:
-            start_idx = content.find('{')
-            end_idx = content.rfind('}')
+        # 4. Estrategia de último recurso: buscar estructuras que se parezcan a JSON
+        # pero que puedan tener problemas de formato (comillas simples, etc.)
+        for candidate in json_candidates:
+            # Reemplazar comillas simples por dobles
+            fixed_json = re.sub(r"'([^']*)':", r'"\1":', candidate)
+            fixed_json = re.sub(r": '([^']*)'", r': "\1"', fixed_json)
             
-            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-                potential_json = content[start_idx:end_idx+1]
-                data = json.loads(potential_json)
-                return data
-        except json.JSONDecodeError:
-            pass
-        
-        # Último recurso: estrategia de búsqueda incremental
-        try:
-            start_idx = content.find('{')
-            if start_idx != -1:
-                # Buscar el cierre de llave correspondiente
-                open_count = 0
-                for i in range(start_idx, len(content)):
-                    if content[i] == '{':
-                        open_count += 1
-                    elif content[i] == '}':
-                        open_count -= 1
-                        if open_count == 0:
-                            # Encontramos un bloque JSON potencialmente válido
-                            potential_json = content[start_idx:i+1]
-                            try:
-                                data = json.loads(potential_json)
-                                return data
-                            except json.JSONDecodeError:
-                                # Continuar buscando otro bloque JSON
-                                pass
-        except Exception:
-            pass
+            try:
+                parsed_json = json.loads(fixed_json)
+                return parsed_json
+            except json.JSONDecodeError:
+                continue
         
         # Si llegamos aquí, no se encontró JSON válido
         logger.warning("No se pudo extraer JSON válido del contenido")
@@ -168,9 +157,9 @@ class AssistantClient:
         if thread_id:
             # Verificar que el thread existe y es válido
             try:
-                # Obtener mensajes para verificar que el thread existe
-                messages = self.get_thread_messages(thread_id, limit=1)
-                if messages is not None:
+                # Verificar que el thread existe
+                thread = self.client.beta.threads.retrieve(thread_id)
+                if thread.id == thread_id:
                     logger.info(f"Thread existente recuperado para usuario {uid}: {thread_id}")
                     return thread_id
             except Exception as e:
@@ -240,6 +229,7 @@ class AssistantClient:
                 try:
                     assistant_id = self.get_assistant_id(task_type, system_message)
                 except Exception as e:
+                    logger.error(f"Error al obtener ID de asistente: {str(e)}")
                     return None, {"error": f"Error al obtener ID de asistente: {str(e)}"}
 
                 # Añadir mensaje al thread
@@ -268,11 +258,25 @@ class AssistantClient:
                 
                 # Obtener contenido y datos JSON
                 content = result.get("content", "")
-                data_json = result.get("data", {})
+                
+                # Verificar que content sea un string válido
+                if not isinstance(content, str):
+                    content = str(content) if content is not None else ""
+                    
+                # Extraer datos JSON con manejo de errores
+                try:
+                    data_json = result.get("data", {})
+                    if not isinstance(data_json, dict):
+                        data_json = {}
+                except Exception:
+                    data_json = {}
                 
                 # Asegurar que tiene marcador via_assistant
                 if isinstance(data_json, dict) and "via_assistant" not in data_json:
                     data_json["via_assistant"] = True
+                
+                # Añadir thread_id al resultado
+                data_json["thread_id"] = thread_id
                 
                 # Registrar métricas
                 tiempo_total = time.time() - tiempo_inicio
@@ -497,10 +501,22 @@ class AssistantClient:
                 # Obtener el último mensaje del asistente
                 for message in messages.data:
                     if message.role == "assistant":
-                        # Extraer contenido
-                        content = message.content[0].text.value
-                        data = extract_json_from_content(content)
-                        return {"content": content, "data": data}
+                        try:
+                            # Extraer contenido de manera segura
+                            content = message.content[0].text.value if (
+                                hasattr(message, 'content') and 
+                                len(message.content) > 0 and 
+                                hasattr(message.content[0], 'text') and
+                                hasattr(message.content[0].text, 'value')
+                            ) else ""
+                            
+                            # Extraer datos JSON con manejo de errores
+                            data = extract_json_from_content(content)
+                            
+                            return {"content": content, "data": data}
+                        except Exception as content_error:
+                            logger.error(f"Error extrayendo contenido: {content_error}")
+                            return {"content": str(message), "data": {}, "error_extract": True}
                 
                 # Si no se encontró respuesta
                 logger.warning("Ejecución completada pero no se encontró respuesta del asistente")
@@ -584,9 +600,10 @@ def get_assistant_client() -> Optional[AssistantClient]:
     Returns:
         AssistantClient o None: Cliente de OpenAI Assistants o None si no está disponible
     """
-    # Verificar si ya existe un cliente en la sesión
-    if "assistant_client" in st.session_state and st.session_state["assistant_client"]:
-        return st.session_state["assistant_client"]
+    # FORZAR RECREACIÓN DEL CLIENTE PARA EVITAR PROBLEMAS
+    if "assistant_client" in st.session_state:
+        logger.info("Recreando cliente de asistente para evitar problemas")
+        del st.session_state["assistant_client"]
     
     # Obtener API key de OpenAI (primero intentar desde secrets)
     api_key = None
@@ -619,4 +636,3 @@ def get_assistant_client() -> Optional[AssistantClient]:
 def set_session_var(key, value):
     """Establece una variable en el estado de sesión de Streamlit"""
     st.session_state[key] = value
-    

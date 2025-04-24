@@ -297,3 +297,30 @@ Utiliza el siguiente formato JSON para tu respuesta:
 }
 ```
 """
+
+# Prompt para clasificación de errores
+PROMPT_CLASIFICACION_ERRORES = """
+Al corregir el texto, clasifica todos los errores encontrados en estas CINCO categorías específicas:
+
+1. Gramática: Errores en tiempo verbal, conjugación, concordancia de género/número, uso de artículos, preposiciones, etc.
+2. Léxico: Uso inadecuado de palabras, falsos amigos, vocabulario impreciso, palabras inexistentes, etc.
+3. Estilo: Repeticiones, registro inadecuado, estructuras poco naturales, frases confusas, etc.
+4. Puntuación: Comas, puntos, acentuación, signos de exclamación/interrogación, uso de mayúsculas, etc.
+5. Estructura textual: Organización de párrafos, uso de conectores, coherencia y cohesión, introducción y conclusión, etc.
+
+Durante tu análisis, lleva un conteo exacto del número de errores en cada categoría.
+
+Al final de tu respuesta, SIEMPRE incluye un resumen JSON con el conteo de errores, de esta forma:
+
+```json
+{
+  "gramatica": 4,
+  "lexico": 3,
+  "estilo": 2,
+  "puntuacion": 5,
+  "estructura_textual": 1
+}
+```
+
+Es IMPRESCINDIBLE que uses exactamente estos nombres de categorías en el JSON: "gramatica", "lexico", "estilo", "puntuacion", "estructura_textual".
+"""

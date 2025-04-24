@@ -42,7 +42,7 @@ OPENAI_MODELS_PREFERIDOS_CAPACIDAD = [
 ]
 
 # IDs de asistentes de OpenAI
-OPENAI_ASSISTANT_CORRECCION = "asst_abc123" # Reemplazar con IDs reales
+OPENAI_ASSISTANT_CORRECCION = "asst_ahcOfjROHfqwWAtxZygOvoMd" # Reemplazar con IDs reales
 OPENAI_ASSISTANT_EJERCICIOS = "asst_def456" # Reemplazar con IDs reales
 OPENAI_ASSISTANT_SIMULACRO = "asst_ghi789"  # Reemplazar con IDs reales
 

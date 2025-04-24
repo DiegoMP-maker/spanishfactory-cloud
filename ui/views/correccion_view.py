@@ -11,17 +11,18 @@ import streamlit as st
 import time
 from datetime import datetime
 
-from features.correccion import (
-    corregir_texto,
-    guardar_correccion_firebase,
-    obtener_historial_correcciones
-)
+# Corregir importaciones - eliminar obtener_historial_correcciones de features.correccion
+from features.correccion import corregir_texto
+# Importar funciones de Firebase
+from core.firebase_client import guardar_correccion_firebase, obtener_historial_correcciones
 from core.session_manager import get_session_var, set_session_var, get_user_info
 from ui.main_layout import mostrar_mensaje_error, mostrar_leyenda_errores
 from utils.text_processing import extract_errores_from_json
 from features.exportacion import mostrar_opciones_exportacion
 
 logger = logging.getLogger(__name__)
+
+
 
 def render_view():
     """
