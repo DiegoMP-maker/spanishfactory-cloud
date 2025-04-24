@@ -11,3 +11,4 @@ requests==2.31.0
 numpy==1.26.3
 python-dateutil==2.8.2
 regex==2023.10.3
+elevenlabs==0.2.27  # Para generación de audio del consejo final

@@ -19,6 +19,7 @@ from core.assistant_client import get_assistant_client
 from core.firebase_client import guardar_correccion_firebase
 from utils.text_processing import extract_errores_from_json
 from core.openai_utils import clean_openai_clients_from_session
+from features.correccion_view import display_result_with_mode_toggle
 
 logger = logging.getLogger(__name__)
 
@@ -499,7 +500,10 @@ Tipo de texto: """ + tipo_texto + """
                 "errores": errores_formateados,
                 "nivel": nivel,
                 "tipo_texto": tipo_texto,
-                "conteo_errores": conteo_errores
+                "conteo_errores": conteo_errores,
+                # Añadir análisis contextual completo para nuevas visualizaciones
+                "analisis_contextual": json_data.get("analisis_contextual", {}),
+                "consejo_final": json_data.get("consejo_final", "")
             }
             
             # Guardar corrección en Firebase si hay UID
@@ -516,13 +520,17 @@ Tipo de texto: """ + tipo_texto + """
                         "timestamp": time.time(),
                         "fecha": datetime.now().isoformat(),
                         "puntuacion": puntuacion_general,
-                        "conteo_errores": conteo_errores
+                        "conteo_errores": conteo_errores,
+                        # Añadir análisis contextual para histórico completo
+                        "analisis_contextual": json_data.get("analisis_contextual", {}),
+                        "consejo_final": json_data.get("consejo_final", "")
                     }
                     from core.firebase_client import guardar_correccion_firebase
                     guardar_correccion_firebase(guardar_datos)
                 except Exception as e:
                     logger.error(f"Error guardando corrección en Firebase: {e}")
             
+            # Devolver resultado para visualización
             return resultado
             
         except Exception as e:
@@ -537,9 +545,38 @@ Tipo de texto: """ + tipo_texto + """
                 "errores": [],
                 "nivel": nivel,
                 "tipo_texto": tipo_texto,
-                "conteo_errores": {}
+                "conteo_errores": {},
+                "analisis_contextual": {},
+                "consejo_final": ""
             }
             
     except Exception as e:
         logger.error(f"Error en corrección de texto: {str(e)}")
         return {"error": f"Error procesando la corrección: {str(e)}"}
+
+def mostrar_resultado_correccion(resultado, api_keys=None, circuit_breaker=None):
+    """
+    Muestra el resultado de la corrección utilizando la nueva interfaz visual.
+    
+    Args:
+        resultado (dict): Resultado de la corrección
+        api_keys (dict, opcional): Diccionario con claves de API
+        circuit_breaker (object, opcional): Objeto CircuitBreaker para control de errores
+        
+    Returns:
+        None
+    """
+    try:
+        # Verificar si hay error
+        if not resultado or "error" in resultado:
+            error_msg = resultado.get("error", "Error desconocido") if resultado else "No hay resultado disponible"
+            st.error(f"Error en la corrección: {error_msg}")
+            return
+        
+        # Mostrar resultado con la nueva visualización
+        display_result_with_mode_toggle(resultado, api_keys, circuit_breaker)
+        
+    except Exception as e:
+        logger.error(f"Error mostrando resultado de corrección: {str(e)}")
+        st.error(f"Error al mostrar el resultado: {str(e)}")
+        

@@ -40,6 +40,49 @@ from ui.login import mostrar_login
 # Importar vistas
 from ui.views.correccion_view import render_view as render_correccion
 
+# Configurar Circuit Breaker para controlar llamadas a APIs externas
+def configurar_circuit_breaker():
+    """
+    Configura el Circuit Breaker para controlar llamadas a APIs externas.
+    
+    Returns:
+        None
+    """
+    try:
+        # Importar CircuitBreaker
+        from core.circuit_breaker import CircuitBreaker
+        
+        # Inicializar si no existe
+        if 'circuit_breaker' not in st.session_state:
+            st.session_state.circuit_breaker = CircuitBreaker(
+                name="app_circuit_breaker"  # El parámetro correcto es 'name', no 'max_failures'
+            )
+            logger.info("Circuit Breaker inicializado")
+    except Exception as e:
+        logger.error(f"Error configurando Circuit Breaker: {str(e)}")
+
+# Configurar API keys para servicios externos
+def configurar_api_keys():
+    """
+    Configura las claves de API para servicios externos.
+    
+    Returns:
+        None
+    """
+    try:
+        # Inicializar api_keys si no existe
+        if 'api_keys' not in st.session_state:
+            st.session_state.api_keys = {
+                "elevenlabs": {
+                    "api_key": st.secrets.get("ELEVENLABS_API_KEY", ""),
+                    "voice_id": st.secrets.get("ELEVENLABS_VOICE_ID", "")
+                }
+                # Otras APIs se pueden añadir aquí
+            }
+            logger.info("API keys configuradas")
+    except Exception as e:
+        logger.error(f"Error configurando API keys: {str(e)}")
+
 # Temporalmente, vamos a definir funciones placeholder para las otras vistas
 # hasta que se implementen correctamente
 def render_ejercicios():
@@ -76,6 +119,10 @@ def main():
     try:
         # Crear layout principal
         crear_layout_principal()
+        
+        # Configurar Circuit Breaker y API keys para nuevas funcionalidades
+        configurar_circuit_breaker()
+        configurar_api_keys()
         
         # Mostrar pantalla de login si no hay usuario logueado
         usuario_logueado = mostrar_login()

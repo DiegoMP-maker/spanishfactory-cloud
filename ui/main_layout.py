@@ -49,9 +49,20 @@ def aplicar_estilos_css():
         None
     """
     try:
-        # Definir estilos CSS personalizados
-        st.markdown("""
-        <style>
+        # Cargar CSS personalizado desde archivo si existe
+        css_file = get_app_file_path("assets/custom.css")
+        custom_css = ""
+        
+        if os.path.exists(css_file):
+            try:
+                with open(css_file, "r", encoding="utf-8") as f:
+                    custom_css = f.read()
+                logger.info("CSS personalizado cargado desde archivo")
+            except Exception as e:
+                logger.warning(f"Error cargando CSS personalizado desde archivo: {str(e)}")
+        
+        # Definir estilos CSS incorporados
+        base_css = """
         /* Estilos generales */
         .main .block-container {
             padding-top: 2rem;
@@ -241,8 +252,16 @@ def aplicar_estilos_css():
         div[data-baseweb="base-input"] {
             background-color: white !important;
         }
-        </style>
-        """, unsafe_allow_html=True)
+        """
+        
+        # Combinar estilos base con estilos personalizados
+        combined_css = base_css
+        if custom_css:
+            combined_css += "\n/* Estilos personalizados para nuevas visualizaciones */\n" + custom_css
+        
+        # Aplicar estilos
+        st.markdown(f"<style>{combined_css}</style>", unsafe_allow_html=True)
+        
     except Exception as e:
         logger.error(f"Error aplicando estilos CSS: {str(e)}")
 
