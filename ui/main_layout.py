@@ -41,6 +41,12 @@ def setup_page_config():
     except Exception as e:
         logger.error(f"Error configurando página: {str(e)}")
 
+def load_css():
+    # Código existente...
+    
+    # Añadir esta línea
+    st.markdown('<link href="assets/corrector_enhanced.css" rel="stylesheet">', unsafe_allow_html=True)
+
 def aplicar_estilos_css():
     """
     Aplica estilos CSS personalizados a la aplicación.

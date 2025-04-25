@@ -166,116 +166,155 @@ def display_correccion_result(resultado, api_keys=None, circuit_breaker=None):
         analisis_contextual = formatted_result["analisis_contextual"]
         consejo_final = formatted_result["consejo_final"]
         
-        # 1. Sección de texto con errores resaltados
-        st.markdown("### 📝 Texto con errores resaltados")
-        st.info("Pasa el cursor sobre los errores resaltados para ver detalles y correcciones.")
+        # Usar tabs para evitar expanders anidados
+        tabs = st.tabs(["Texto", "Errores", "Análisis", "Consejo Final"])
         
-        # Mostrar texto con errores resaltados
-        display_highlighted_text(texto_original, errores)
-        
-        # 2. Sección de texto corregido
-        with st.expander("Texto corregido", expanded=True):
-            st.markdown(texto_corregido)
-        
-        # 3. Sección de análisis de errores
-        st.markdown("### 🔍 Análisis de errores")
-        
-        # Contar errores por categoría
-        conteo_errores = count_errors_by_category(errores)
-        
-        # Verificar si hay errores
-        if not conteo_errores or sum(conteo_errores.values()) == 0:
-            st.success("¡Felicidades! No se encontraron errores en tu texto.")
-        else:
-            # Columnas para mostrar gráfico y desglose
-            col1, col2 = st.columns([1, 1])
+        # Tab de Texto
+        with tabs[0]:
+            # Subtabs para diferentes vistas del texto
+            texto_tabs = st.tabs(["Texto con errores resaltados", "Texto corregido", "Comparación"])
             
-            with col1:
-                # Crear gráfico de errores
-                try:
-                    # Preparar datos para el gráfico
-                    categorias = list(conteo_errores.keys())
-                    valores = list(conteo_errores.values())
-                    
-                    # Crear gráfico de barras
-                    fig = go.Figure(data=[
-                        go.Bar(
-                            x=categorias,
-                            y=valores,
-                            marker_color=[
-                                '#F44336',  # Rojo para Gramática
-                                '#FFC107',  # Amarillo para Léxico
-                                '#2196F3',  # Azul para Puntuación
-                                '#4CAF50'   # Verde para Estructura textual
-                            ][:len(categorias)],
-                            text=valores,
-                            textposition='auto',
-                            hoverinfo='text',
-                            hovertext=[f"{cat}: {val} error{'es' if val != 1 else ''}" for cat, val in zip(categorias, valores)]
-                        )
-                    ])
-                    
-                    # Personalizar diseño
-                    fig.update_layout(
-                        title="Distribución de errores",
-                        xaxis_title="",
-                        yaxis_title="Cantidad de errores",
-                        template="plotly_white",
-                        margin=dict(l=50, r=50, t=70, b=50),
-                        height=300
-                    )
-                    
-                    # Mostrar gráfico
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                except Exception as e:
-                    logger.error(f"Error creando gráfico de errores: {str(e)}")
-                    st.warning("No se pudo crear el gráfico de errores.")
+            # Tab de texto con errores resaltados
+            with texto_tabs[0]:
+                st.info("Pasa el cursor sobre los errores resaltados para ver detalles y correcciones.")
+                display_highlighted_text(texto_original, errores)
             
-            with col2:
-                # Mostrar desglose de errores
-                display_error_summary(errores)
-        
-        # 4. Sección de análisis contextual
-        if analisis_contextual:
-            st.markdown("### 📊 Análisis contextual")
+            # Tab de texto corregido
+            with texto_tabs[1]:
+                st.markdown("### Texto corregido")
+                st.markdown(texto_corregido)
             
-            # Obtener tipo de gráfico seleccionado (radar o barras)
-            chart_type = get_chart_toggle()
-            
-            # Mostrar análisis contextual
-            display_contextual_analysis(analisis_contextual, chart_type)
-        
-        # 5. Consejo final
-        if consejo_final:
-            st.markdown("### 💡 Consejo final")
-            st.success(consejo_final)
-            
-            # Generar audio del consejo si ElevenLabs está disponible
-            try:
-                audio_bytes = None
-                # Verificar disponibilidad de API
-                if api_keys and "elevenlabs" in api_keys and api_keys["elevenlabs"]["api_key"] and api_keys["elevenlabs"]["voice_id"]:
-                    if circuit_breaker and circuit_breaker.can_execute("elevenlabs"):
-                        # Importar función para generar audio
-                        from core.audio_client import generar_audio_consejo
-                        # Generar audio
-                        audio_bytes = generar_audio_consejo(consejo_final)
+            # Tab de comparación
+            with texto_tabs[2]:
+                # Columnas para comparación
+                col1, col2 = st.columns(2)
                 
-                # Mostrar reproductor de audio si se generó correctamente
-                if audio_bytes:
-                    st.audio(audio_bytes, format="audio/mp3")
-                    st.download_button(
-                        label="⬇️ Descargar audio",
-                        data=audio_bytes,
-                        file_name=f"consejo_{datetime.now().strftime('%Y%m%d_%H%M')}.mp3",
-                        mime="audio/mp3"
+                with col1:
+                    st.markdown("#### Texto original")
+                    st.text_area(
+                        "Original",
+                        value=texto_original,
+                        height=300,
+                        label_visibility="collapsed",
+                        disabled=True
                     )
-            except Exception as audio_error:
-                logger.error(f"Error al generar audio: {str(audio_error)}")
-                # No mostrar mensaje al usuario para evitar confusión
+                
+                with col2:
+                    st.markdown("#### Texto corregido")
+                    st.text_area(
+                        "Corregido",
+                        value=texto_corregido,
+                        height=300,
+                        label_visibility="collapsed",
+                        disabled=True
+                    )
         
-        # 6. Botón para exportar resultado
+        # Tab de Errores
+        with tabs[1]:
+            st.markdown("### 🔍 Análisis de errores")
+            
+            # Contar errores por categoría
+            conteo_errores = count_errors_by_category(errores)
+            
+            # Verificar si hay errores
+            if not conteo_errores or sum(conteo_errores.values()) == 0:
+                st.success("¡Felicidades! No se encontraron errores en tu texto.")
+            else:
+                # Columnas para mostrar gráfico y desglose
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    # Crear gráfico de errores
+                    try:
+                        # Preparar datos para el gráfico
+                        categorias = list(conteo_errores.keys())
+                        valores = list(conteo_errores.values())
+                        
+                        # Crear gráfico de barras
+                        fig = go.Figure(data=[
+                            go.Bar(
+                                x=categorias,
+                                y=valores,
+                                marker_color=[
+                                    '#F44336',  # Rojo para Gramática
+                                    '#FFC107',  # Amarillo para Léxico
+                                    '#2196F3',  # Azul para Puntuación
+                                    '#4CAF50'   # Verde para Estructura textual
+                                ][:len(categorias)],
+                                text=valores,
+                                textposition='auto',
+                                hoverinfo='text',
+                                hovertext=[f"{cat}: {val} error{'es' if val != 1 else ''}" for cat, val in zip(categorias, valores)]
+                            )
+                        ])
+                        
+                        # Personalizar diseño
+                        fig.update_layout(
+                            title="Distribución de errores",
+                            xaxis_title="",
+                            yaxis_title="Cantidad de errores",
+                            template="plotly_white",
+                            margin=dict(l=50, r=50, t=70, b=50),
+                            height=300
+                        )
+                        
+                        # Mostrar gráfico
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                    except Exception as e:
+                        logger.error(f"Error creando gráfico de errores: {str(e)}")
+                        st.warning("No se pudo crear el gráfico de errores.")
+                
+                with col2:
+                    # Mostrar desglose de errores
+                    display_error_summary(errores)
+        
+        # Tab de Análisis contextual
+        with tabs[2]:
+            if analisis_contextual:
+                st.markdown("### 📊 Análisis contextual")
+                
+                # Obtener tipo de gráfico seleccionado (radar o barras)
+                chart_type = get_chart_toggle()
+                
+                # Mostrar análisis contextual
+                display_contextual_analysis(analisis_contextual, chart_type)
+            else:
+                st.info("No hay análisis contextual disponible para este texto.")
+        
+        # Tab de Consejo final
+        with tabs[3]:
+            if consejo_final:
+                st.markdown("### 💡 Consejo final")
+                st.success(consejo_final)
+                
+                # Generar audio del consejo si ElevenLabs está disponible
+                try:
+                    audio_bytes = None
+                    # Verificar disponibilidad de API
+                    if api_keys and "elevenlabs" in api_keys and api_keys["elevenlabs"]["api_key"] and api_keys["elevenlabs"]["voice_id"]:
+                        if circuit_breaker and circuit_breaker.can_execute("elevenlabs"):
+                            # Importar función para generar audio
+                            from core.audio_client import generar_audio_consejo
+                            # Generar audio
+                            audio_bytes = generar_audio_consejo(consejo_final)
+                    
+                    # Mostrar reproductor de audio si se generó correctamente
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3")
+                        st.download_button(
+                            label="⬇️ Descargar audio",
+                            data=audio_bytes,
+                            file_name=f"consejo_{datetime.now().strftime('%Y%m%d_%H%M')}.mp3",
+                            mime="audio/mp3"
+                        )
+                except Exception as audio_error:
+                    logger.error(f"Error al generar audio: {str(audio_error)}")
+                    # No mostrar mensaje al usuario para evitar confusión
+            else:
+                st.info("No hay consejo final disponible para este texto.")
+        
+        # 6. Botón para exportar resultado (fuera de los tabs)
         st.markdown("### 📥 Exportar resultado")
         if st.button("Exportar resultado completo", key="export_result"):
             try:
@@ -425,3 +464,4 @@ def display_result_with_mode_toggle(resultado, api_keys=None, circuit_breaker=No
         logger.error(f"Error mostrando resultado con toggle de modo: {str(e)}")
         # Fallback a vista estándar
         display_correccion_result(resultado, api_keys, circuit_breaker)
+        
