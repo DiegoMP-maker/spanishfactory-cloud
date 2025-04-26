@@ -13,6 +13,15 @@ import hashlib
 import logging
 import traceback
 import streamlit as st
+import os
+
+# Asegurar que la configuración de proxies esté limpia antes de importar openai
+if "HTTP_PROXY" in os.environ:
+    del os.environ["HTTP_PROXY"]
+if "HTTPS_PROXY" in os.environ:
+    del os.environ["HTTPS_PROXY"]
+
+# Importación segura de openai
 import openai
 
 # Importar dependencias del proyecto
@@ -116,7 +125,7 @@ class OpenAIAssistants:
         # Cargar IDs de asistentes desde secrets si están disponibles
         self._load_assistant_ids_from_secrets()
         
-        # Inicializar cliente
+        # Inicializar cliente (solo configurar API key)
         self._initialize_client()
     
     def _load_assistant_ids_from_secrets(self):
@@ -147,29 +156,32 @@ class OpenAIAssistants:
                     logger.info(f"Cargada ID de asistente de corrección desde nivel principal: {self.ASSISTANT_IDS['correccion_texto']}")
                     
                 # Cargar también los IDs configurados en settings.py
-                from config.settings import (
-                    OPENAI_ASSISTANT_CORRECCION,
-                    OPENAI_ASSISTANT_EJERCICIOS,
-                    OPENAI_ASSISTANT_SIMULACRO
-                )
-                
-                if OPENAI_ASSISTANT_CORRECCION and not self.ASSISTANT_IDS["correccion_texto"]:
-                    self.ASSISTANT_IDS["correccion_texto"] = OPENAI_ASSISTANT_CORRECCION
-                    logger.info(f"Cargada ID de asistente de corrección desde settings: {self.ASSISTANT_IDS['correccion_texto']}")
-                
-                if OPENAI_ASSISTANT_EJERCICIOS and not self.ASSISTANT_IDS["generacion_ejercicios"]:
-                    self.ASSISTANT_IDS["generacion_ejercicios"] = OPENAI_ASSISTANT_EJERCICIOS
-                    logger.info(f"Cargada ID de asistente de ejercicios desde settings: {self.ASSISTANT_IDS['generacion_ejercicios']}")
-                
-                if OPENAI_ASSISTANT_SIMULACRO and not self.ASSISTANT_IDS["simulacro_examen"]:
-                    self.ASSISTANT_IDS["simulacro_examen"] = OPENAI_ASSISTANT_SIMULACRO
-                    logger.info(f"Cargada ID de asistente de simulacro desde settings: {self.ASSISTANT_IDS['simulacro_examen']}")
+                try:
+                    from config.settings import (
+                        OPENAI_ASSISTANT_CORRECCION,
+                        OPENAI_ASSISTANT_EJERCICIOS,
+                        OPENAI_ASSISTANT_SIMULACRO
+                    )
+                    
+                    if OPENAI_ASSISTANT_CORRECCION and not self.ASSISTANT_IDS["correccion_texto"]:
+                        self.ASSISTANT_IDS["correccion_texto"] = OPENAI_ASSISTANT_CORRECCION
+                        logger.info(f"Cargada ID de asistente de corrección desde settings: {self.ASSISTANT_IDS['correccion_texto']}")
+                    
+                    if OPENAI_ASSISTANT_EJERCICIOS and not self.ASSISTANT_IDS["generacion_ejercicios"]:
+                        self.ASSISTANT_IDS["generacion_ejercicios"] = OPENAI_ASSISTANT_EJERCICIOS
+                        logger.info(f"Cargada ID de asistente de ejercicios desde settings: {self.ASSISTANT_IDS['generacion_ejercicios']}")
+                    
+                    if OPENAI_ASSISTANT_SIMULACRO and not self.ASSISTANT_IDS["simulacro_examen"]:
+                        self.ASSISTANT_IDS["simulacro_examen"] = OPENAI_ASSISTANT_SIMULACRO
+                        logger.info(f"Cargada ID de asistente de simulacro desde settings: {self.ASSISTANT_IDS['simulacro_examen']}")
+                except Exception as settings_error:
+                    logger.warning(f"Error cargando IDs de settings: {settings_error}")
         except Exception as e:
             logger.warning(f"Error al cargar IDs de asistentes desde secrets: {e}")
     
     def _initialize_client(self):
         """
-        Inicializa el cliente de OpenAI.
+        Inicializa el cliente de OpenAI configurando solo la API key.
         """
         try:
             # Configurar API key globalmente
@@ -178,7 +190,7 @@ class OpenAIAssistants:
             # Verificar conectividad con una operación simple
             try:
                 # Listar asistentes para verificar acceso
-                openai.beta.assistants.list(limit=1)
+                response = openai.beta.assistants.list(limit=1)
                 
                 # Verificar asistentes configurados
                 if any(self.ASSISTANT_IDS.values()):
@@ -186,7 +198,7 @@ class OpenAIAssistants:
                         if assistant_id:
                             try:
                                 # Verificar que el asistente existe
-                                openai.beta.assistants.retrieve(assistant_id)
+                                assistant = openai.beta.assistants.retrieve(assistant_id)
                                 logger.info(f"Asistente para {task_type} verificado: {assistant_id}")
                             except Exception as e:
                                 logger.warning(f"No se pudo verificar el asistente para {task_type} ({assistant_id}): {e}")
@@ -220,7 +232,7 @@ class OpenAIAssistants:
             return False
             
         try:
-            # Verificar que el thread existe usando el módulo global openai
+            # Verificar que el thread existe
             thread = openai.beta.threads.retrieve(thread_id)
             if thread.id == thread_id:
                 logger.info(f"Thread existente verificado: {thread_id}")
@@ -265,7 +277,7 @@ class OpenAIAssistants:
             # Si no tiene la palabra "json", añadir una nota
             if not has_json_keyword:
                 logger.warning("El mensaje del sistema no contiene la palabra 'json', usando formato de respuesta abierto")
-            
+                
             # Crear el asistente con la configuración adecuada
             assistant = openai.beta.assistants.create(
                 name=f"TextoCorrector ELE - {task_type}",
@@ -273,6 +285,7 @@ class OpenAIAssistants:
                 model=self.current_model,
                 response_format=response_format
             )
+            
             assistant_id = assistant.id
             
             # Guardar en caché
@@ -285,8 +298,8 @@ class OpenAIAssistants:
             raise
     
     def get_completion(self, system_message, user_message, 
-                     max_retries=MAX_RETRIES, task_type="default", 
-                     thread_id=None):
+                      max_retries=MAX_RETRIES, task_type="default", 
+                      thread_id=None):
         """
         Obtiene una respuesta usando OpenAI Assistants con soporte para thread persistente.
         
@@ -562,6 +575,12 @@ def get_openai_assistants_client():
     Returns:
         OpenAIAssistants o None: Cliente de OpenAI Assistants o None si no está disponible
     """
+    # Limpiar cualquier configuración de proxies en variables de entorno
+    if "HTTP_PROXY" in os.environ:
+        del os.environ["HTTP_PROXY"]
+    if "HTTPS_PROXY" in os.environ:
+        del os.environ["HTTPS_PROXY"]
+    
     # Obtener API key de OpenAI
     from core.openai_utils import get_openai_api_key
     api_key = get_openai_api_key()
@@ -577,6 +596,13 @@ def get_openai_assistants_client():
     
     # Configurar API key globalmente
     openai.api_key = api_key
+    
+    # Intentar actualizar openai_init (ya que puede tener monkey patching)
+    try:
+        from core.openai_init import init_openai
+        init_openai()
+    except Exception as e:
+        logger.warning(f"Error al inicializar OpenAI con openai_init: {e}")
     
     # Crear cliente
     client = OpenAIAssistants(api_key=api_key)

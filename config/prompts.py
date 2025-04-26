@@ -22,6 +22,8 @@ Texto original:
 
 {instrucciones_adicionales}
 
+Comienza con un saludo personal y amigable al estudiante, felicitándole por su esfuerzo en aprender español.
+
 Por favor, proporciona:
 
 1. El texto corregido con las correcciones necesarias.
@@ -31,27 +33,38 @@ Por favor, proporciona:
 
 Utiliza el siguiente formato JSON para tu respuesta:
 ```json
-{
+{{
+  "saludo": "¡Hola! He revisado tu texto y quiero felicitarte por tu esfuerzo...",
+  "tipo_texto": "Tipo de texto (narrativo, argumentativo, etc.)",
+  "texto_original": "Texto original sin cambios",
   "texto_corregido": "Texto con las correcciones",
-  "retroalimentacion": "Explicación detallada y consejos de mejora",
-  "errores": [
-    {
-      "categoria": "Tipo de error (Ortografía, Gramática, etc.)",
-      "cantidad": 123,
-      "ejemplos": [
-        {
-          "texto": "Ejemplo del error",
-          "sugerencia": "Corrección sugerida",
-          "explicacion": "Breve explicación"
-        }
-      ]
-    }
-  ],
+  "errores": {{
+    "Gramática": [
+      {{
+        "fragmento_erroneo": "Ejemplo del error",
+        "correccion": "Corrección sugerida",
+        "explicacion": "Breve explicación"
+      }}
+    ],
+    "Léxico": [],
+    "Puntuación": [],
+    "Estilo": [],
+    "Estructura textual": []
+  }},
+  "analisis_contextual": {{
+    "adecuacion": 7,
+    "coherencia": 6,
+    "cohesion": 8,
+    "correccion": 7,
+    "variedad": 6
+  }},
+  "consejo_final": "Un consejo personalizado para mejorar",
   "puntuacion": 7.5
-}
+}}
 ```
 
 El nivel de detalle de la corrección debe ser: {detalle}.
+{idioma}
 """
 
 # Prompts para generación de ejercicios
