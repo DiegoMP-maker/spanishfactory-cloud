@@ -7,6 +7,11 @@ Este archivo es el punto de entrada principal de la aplicación Textocorrector E
 Configura la interfaz de usuario y gestiona la navegación entre las diferentes vistas.
 """
 
+# Importar el inicializador de OpenAI y ejecutarlo inmediatamente
+from core.openai_init import init_openai
+# Inicializar OpenAI al inicio, antes de cualquier otra importación relacionada
+init_openai()
+
 import logging
 import streamlit as st
 import os

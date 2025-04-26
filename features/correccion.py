@@ -2,581 +2,325 @@
 # -*- coding: utf-8 -*-
 """
 Módulo de corrección de textos
-------------------------------
-Este módulo contiene la lógica para corregir textos usando el Asistente de OpenAI.
+-----------------------------
+Este módulo contiene funciones para procesar y corregir textos en español.
 """
 
 import logging
 import json
-from datetime import datetime
-import time
-import streamlit as st
 import re
+import traceback
+import streamlit as st
 
-from config.settings import OPENAI_ASSISTANT_CORRECCION
-from config.prompts import PROMPT_CORRECCION, PROMPT_CLASIFICACION_ERRORES
-from core.assistant_client import get_assistant_client
-from core.firebase_client import guardar_correccion_firebase
-from utils.text_processing import extract_errores_from_json
-from core.openai_utils import clean_openai_clients_from_session
-from features.correccion_view import display_result_with_mode_toggle
+from core.openai_integration import process_with_assistant
+from core.circuit_breaker import circuit_breaker
+from core.session_manager import get_user_info, get_session_var
+from config.settings import NIVELES_ESPANOL
+from config.settings import IS_DEV  
 
 logger = logging.getLogger(__name__)
 
-def extract_json_from_content(content):
+def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idioma="español"):
     """
-    Extrae JSON válido de una cadena de texto que puede contener otros elementos.
-    Versión robusta que maneja múltiples casos de error.
+    Procesa un texto con el asistente de OpenAI para obtener correcciones.
     
     Args:
-        content (str): Contenido que puede incluir JSON
+        texto_input (str): Texto a corregir
+        nivel (str): Nivel de español del estudiante
+        detalle (str): Nivel de detalle para las correcciones
+        user_id (str, opcional): ID del usuario
+        idioma (str, opcional): Idioma para las explicaciones
         
     Returns:
-        dict/None: Diccionario con el JSON extraído o None si no se encuentra
-    """
-    if not content:
-        return None
-    
-    # Verificar si content es un string
-    if not isinstance(content, str):
-        try:
-            content = str(content)  # Intentar convertir a string
-        except Exception as e:
-            logger.error(f"Error convirtiendo contenido a string: {e}")
-            return None
-    
-    # Lista para almacenar posibles cadenas JSON
-    json_candidates = []
-    
-    try:
-        # 1. Estrategia 1: Buscar JSON en bloques de código Markdown
-        try:
-            json_code_blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)```', content)
-            for block in json_code_blocks:
-                json_candidates.append(block.strip())
-        except Exception as e:
-            logger.warning(f"Error buscando bloques de código JSON: {e}")
-        
-        # 2. Estrategia 2: Buscar JSON delimitado por llaves
-        if not json_candidates:
-            try:
-                # Buscar todos los pares de llaves balanceados
-                stack = []
-                start_indices = []
-                
-                for i, char in enumerate(content):
-                    if char == '{':
-                        if len(stack) == 0:  # Inicio de un posible objeto JSON
-                            start_indices.append(i)
-                        stack.append('{')
-                    elif char == '}' and stack:
-                        stack.pop()
-                        if len(stack) == 0:  # Fin de un posible objeto JSON
-                            start_idx = start_indices.pop() if start_indices else -1
-                            if start_idx != -1:
-                                json_candidates.append(content[start_idx:i+1])
-            except Exception as e:
-                logger.warning(f"Error buscando pares de llaves balanceados: {e}")
-        
-        # 3. Estrategia 3: Intento directo (por si el contenido es directamente JSON)
-        json_candidates.append(content.strip())
-        
-        # 4. Estrategia 4: Buscar fragmentos que parezcan JSON
-        try:
-            # Buscar algo que parezca un objeto JSON
-            json_like_pattern = r'(\{\s*"[^"]+"\s*:.*\})'
-            matches = re.findall(json_like_pattern, content)
-            for match in matches:
-                if match not in json_candidates:
-                    json_candidates.append(match)
-        except Exception as e:
-            logger.warning(f"Error buscando fragmentos tipo JSON: {e}")
-        
-        # Probar cada candidato
-        for candidate in json_candidates:
-            try:
-                parsed_json = json.loads(candidate)
-                if isinstance(parsed_json, dict) and len(parsed_json) > 0:
-                    return parsed_json
-            except json.JSONDecodeError:
-                continue
-            except Exception as e:
-                logger.warning(f"Error al parsear candidato JSON: {e}")
-        
-        # Estrategia de último recurso: arreglar comillas y caracteres problemáticos
-        for candidate in json_candidates:
-            try:
-                # Reemplazar comillas simples por dobles
-                fixed_json = re.sub(r"'([^']*)':", r'"\1":', candidate)
-                fixed_json = re.sub(r": '([^']*)'", r': "\1"', fixed_json)
-                
-                # Escapar comillas dentro de strings
-                fixed_json = re.sub(r'([^\\])"([^"]*)"', r'\1\"\2\"', fixed_json)
-                
-                # Eliminar caracteres de control
-                fixed_json = ''.join(ch for ch in fixed_json if ord(ch) >= 32 or ch == '\n')
-                
-                # Intento final
-                parsed_json = json.loads(fixed_json)
-                if isinstance(parsed_json, dict) and len(parsed_json) > 0:
-                    return parsed_json
-            except Exception:
-                continue
-        
-        # Si llegamos aquí, no se encontró JSON válido
-        logger.warning("No se pudo extraer JSON válido del contenido")
-        
-        # Último recurso: Intentar construir un JSON básico a partir del contenido
-        try:
-            # Buscar pares clave-valor con regex
-            patterns = [
-                r'"([^"]+)"\s*:\s*"([^"]*)"',  # "key": "value"
-                r'"([^"]+)"\s*:\s*(\d+)',      # "key": 123
-                r'"([^"]+)"\s*:\s*(\{.*\})'    # "key": {...}
-            ]
-            
-            result_dict = {}
-            for pattern in patterns:
-                matches = re.findall(pattern, content)
-                for key, value in matches:
-                    # Intentar convertir value a int si parece un número
-                    if value.isdigit():
-                        value = int(value)
-                    result_dict[key] = value
-            
-            if result_dict:
-                return result_dict
-        except Exception as e:
-            logger.warning(f"Error en extracción de emergencia: {e}")
-        
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error extrayendo JSON del contenido: {str(e)}")
-        return None
-    
-def corregir_texto(texto, parametros, uid=None):
-    """
-    Corrige un texto utilizando el Asistente de OpenAI y actualiza estadísticas de errores.
-    Adaptado para el formato JSON del asistente ELE.
-    
-    Args:
-        texto (str): Texto a corregir
-        parametros (dict): Parámetros para la corrección (nivel, tipo_texto, detalle, etc.)
-        uid (str, opcional): ID del usuario
-        
-    Returns:
-        dict: Resultado de la corrección o error
+        dict: Resultado de la corrección o diccionario con información de error
     """
     try:
-        # Limpiar cualquier cliente inválido que pudiera estar en session_state
-        from core.openai_utils import clean_openai_clients_from_session
-        clean_openai_clients_from_session()
+        # Validación inicial del texto
+        if texto_input is None:
+            logger.error("El parámetro 'texto_input' es None")
+            return {
+                "error": True,
+                "mensaje": "No se proporcionó texto para corregir",
+                "texto_original": ""
+            }
         
-        # Obtener cliente del asistente
-        client = get_assistant_client()
-        if not client:
-            return {"error": "No se pudo obtener el cliente del asistente"}
+        # Verificar que el texto no esté vacío
+        if not isinstance(texto_input, str):
+            logger.error(f"El parámetro 'texto_input' no es una cadena: {type(texto_input)}")
+            texto_input = str(texto_input) if texto_input is not None else ""
+            
+        if not texto_input.strip():
+            logger.warning("Texto vacío para corrección")
+            return {
+                "error": True,
+                "mensaje": "No se proporcionó texto para corregir",
+                "texto_original": texto_input
+            }
         
-        # Extraer parámetros
-        nivel = parametros.get("nivel", "B1")
-        tipo_texto = parametros.get("tipo_texto", "General")
-        detalle = parametros.get("detalle", "Intermedio")
-        enfoque = parametros.get("enfoque", None)
-        instrucciones = parametros.get("instrucciones", None)
+        # Validación de nivel
+        if not nivel or not isinstance(nivel, str):
+            logger.warning(f"Nivel inválido: {nivel}")
+            nivel = "B1"  # Valor por defecto
         
-        # Determinar el idioma de las explicaciones (por defecto español)
-        idioma = "español"
-        
-        # Definir el prompt del profesor ELE
-        prompt = """
-Eres Diego, un profesor experto en ELE (Español como Lengua Extranjera) especializado en análisis lingüístico contextual.
-Tu objetivo es corregir textos adaptando tu feedback al nivel del estudiante y cumpliendo rigurosamente con el formato de respuesta.
+        # Preparar mensaje para el asistente
+        try:
+            # El asistente ya tiene instrucciones configuradas, añadimos instrucciones específicas
+            # para la evaluación adaptada al nivel
+            user_message = f"""
+Texto para revisar (nivel declarado del estudiante: {nivel}):
+"{texto_input}"
 
-RESPONDE SIEMPRE EN JSON. No escribas texto introductorio ni explicaciones fuera del JSON.
+Nivel de detalle deseado: {detalle}
+Idioma para explicaciones: {idioma}
 
-OBLIGATORIAMENTE debes entregar tu respuesta siguiendo esta estructura JSON exacta:
-{
-  "saludo": "string",                // en español - personalizado para el estudiante
-  "tipo_texto": "string",            // en español
-  "errores": {
-       "Gramática": [
-           {
-             "fragmento_erroneo": "string",
-             "correccion": "string",
-             "explicacion": "string"  // en español
-           }
-           // más errores de Gramática (o [] si ninguno)
-       ],
-       "Léxico": [
-           {
-             "fragmento_erroneo": "string",
-             "correccion": "string",
-             "explicacion": "string"  // en español
-           }
-       ],
-       "Puntuación": [
-           {
-             "fragmento_erroneo": "string",
-             "correccion": "string",
-             "explicacion": "string"  // en español
-           }
-       ],
-       "Estructura textual": [
-           {
-             "fragmento_erroneo": "string",
-             "correccion": "string",
-             "explicacion": "string"  // en español
-           }
-       ]
-  },
-  "texto_corregido": "string",       // siempre en español
-  "analisis_contextual": {
-       "coherencia": {
-           "puntuacion": number,     // del 1 al 10
-           "comentario": "string",   // en español
-           "sugerencias": [          // listado de sugerencias en español
-               "string",
-               "string"
-           ]
-       },
-       "cohesion": {
-           "puntuacion": number,     // del 1 al 10
-           "comentario": "string",   // en español
-           "sugerencias": [          // listado de sugerencias en español
-               "string",
-               "string"
-           ]
-       },
-       "registro_linguistico": {
-           "puntuacion": number,     // del 1 al 10
-           "tipo_detectado": "string", // tipo de registro detectado en español
-           "adecuacion": "string",   // evaluación de adecuación en español
-           "sugerencias": [          // listado de sugerencias en español
-               "string",
-               "string"
-           ]
-       },
-       "adecuacion_cultural": {
-           "puntuacion": number,     // del 1 al 10
-           "comentario": "string",   // en español
-           "elementos_destacables": [  // elementos culturales destacables en español
-               "string",
-               "string"
-           ],
-           "sugerencias": [          // listado de sugerencias en español
-               "string",
-               "string"
-           ]
-       }
-  },
-  "consejo_final": "string",         // en español
-  "fin": "Fin de texto corregido."
-}
-
-INSTRUCCIONES CRÍTICAS:
-- Las explicaciones y comentarios DEBEN estar en español.
-- El texto corregido completo SIEMPRE debe estar en español.
-- El consejo final SIEMPRE debe estar en español.
-- Adapta tus explicaciones y sugerencias al nivel indicado del estudiante.
-- Considera el tipo de texto y el contexto cultural en tu análisis.
-- Cada error debe incluir un fragmento específico del texto original, no generalidades.
-- Las puntuaciones deben basarse en criterios objetivos y ser consistentes con el nivel.
-- Sugerencias concretas y aplicables que el estudiante pueda implementar.
-- Asegúrate de que el texto corregido mantenga la voz y estilo del estudiante.
-
-NIVELES Y ENFOQUE:
-- Para nivel principiante (A1-A2): Enfócate en estructuras básicas, vocabulario fundamental y errores comunes. Utiliza explicaciones simples y claras. Evita terminología lingüística compleja.
-- Para nivel intermedio (B1-B2): Puedes señalar errores más sutiles de concordancia, uso de tiempos verbales y preposiciones. Puedes usar alguna terminología lingüística básica en las explicaciones.
-- Para nivel avanzado (C1-C2): Céntrate en matices, coloquialismos, registro lingüístico y fluidez. Puedes usar terminología lingüística específica y dar explicaciones más detalladas y técnicas.
-
-OBLIGATORIO: Devuelve tu respuesta solo como un objeto JSON válido, sin texto adicional antes ni después.
-
-Nivel del estudiante: """ + nivel + """
-Tipo de texto: """ + tipo_texto + """
+IMPORTANTE: Al evaluar, considera que los errores deben penalizarse de manera diferente según el nivel del estudiante. Un error básico en un estudiante de nivel avanzado debe tener mayor impacto en la puntuación que el mismo error en un principiante.
 """
+        except Exception as format_error:
+            logger.error(f"Error formateando mensajes: {str(format_error)}")
+            # Incluir más detalles del error para facilitar el debug
+            error_details = traceback.format_exc()
+            logger.debug(f"Detalles del error de formato:\n{error_details}")
+            return {
+                "error": True, 
+                "mensaje": "Error preparando la solicitud.",
+                "texto_original": texto_input
+            }
         
-        # Registrar inicio de corrección
-        start_time = time.time()
-        logger.info(f"Iniciando corrección de texto para nivel {nivel}")
+        # Verificar circuit breaker
+        if not circuit_breaker.can_execute("openai"):
+            logger.error("Circuit breaker abierto para OpenAI")
+            return {
+                "error": True, 
+                "mensaje": "Servicio temporalmente no disponible. Por favor, inténtalo de nuevo más tarde.",
+                "texto_original": texto_input
+            }
         
         # Procesar con el asistente
-        contenido, datos_json = client.process_with_assistant(
-            system_message=prompt,
-            user_message=texto,
-            task_type="correccion_texto",
-            user_uid=uid
-        )
-        
-        # Registrar tiempo de procesamiento
-        elapsed_time = time.time() - start_time
-        logger.info(f"Corrección completada en {elapsed_time:.2f} segundos")
-        
-        # Verificar si hay error
-        if not contenido or 'error' in datos_json:
-            error_msg = datos_json.get('error', 'Error desconocido durante la corrección')
-            logger.error(f"Error en corrección: {error_msg}")
-            return {"error": error_msg}
-        
-        # Extraer resultado en formato JSON si está disponible
         try:
-            # Función robusta para extraer JSON
-            def extraer_json_seguro(contenido):
-                """Extrae JSON válido de cualquier formato de respuesta."""
-                # Verificar si contenido es None o vacío
-                if not contenido:
-                    return {}
-                
-                # Asegurar que contenido sea string
-                if not isinstance(contenido, str):
-                    try:
-                        contenido = str(contenido)
-                    except Exception as e:
-                        logger.error(f"No se pudo convertir contenido a string: {e}")
-                        return {}
-                
-                try:
-                    # 1. Intento directo: parsear todo el contenido como JSON
-                    try:
-                        return json.loads(contenido)
-                    except json.JSONDecodeError:
-                        pass
-                    
-                    # 2. Buscar JSON entre llaves
-                    inicio = contenido.find('{')
-                    fin = contenido.rfind('}')
-                    
-                    if inicio != -1 and fin != -1 and inicio < fin:
-                        json_texto = contenido[inicio:fin+1]
-                        try:
-                            return json.loads(json_texto)
-                        except json.JSONDecodeError:
-                            pass
-                    
-                    # 3. Buscar bloques de código JSON
-                    matches = re.findall(r'```(?:json)?\s*([\s\S]*?)```', contenido)
-                    for match in matches:
-                        try:
-                            return json.loads(match.strip())
-                        except json.JSONDecodeError:
-                            continue
-                    
-                    # 4. Fallback: crear objeto simple con el contenido original
-                    logger.warning("No se pudo extraer JSON, retornando objeto simple")
-                    return {
-                        "texto_corregido": contenido,
-                        "error_extraccion": True
-                    }
-                    
-                except Exception as e:
-                    logger.error(f"Error extracting JSON: {e}")
-                    return {
-                        "texto_corregido": contenido[:200] + "..." if len(contenido) > 200 else contenido,
-                        "error_extraccion": True,
-                        "error": str(e)
-                    }
+            # Obtener thread_id actual si existe
+            thread_id = get_session_var("thread_id")
             
-            # Usar la función robusta para extraer JSON
-            json_data = extraer_json_seguro(contenido)
+            # Loguear para debug
+            logger.info(f"Enviando texto de longitud {len(texto_input)} a procesar")
             
-            # Guardar JSON completo para referencia
-            json_errores = json.dumps(json_data)
+            # Procesar con el asistente usando la nueva interfaz
+            content, data = process_with_assistant(
+                system_message="",  # Vacío, ya que el asistente tiene su propio system message
+                user_message=user_message,
+                task_type="correccion_texto",
+                thread_id=thread_id,
+                user_id=user_id
+            )
             
-            # Extraer el texto corregido del nuevo formato
-            texto_corregido = json_data.get("texto_corregido", contenido)
+            # Loguear resultado para debug
+            logger.info(f"Recibida respuesta: content={type(content)}, data={type(data) if data is not None else None}")
             
-            # Extraer retroalimentación - combinar diferentes partes del análisis
-            retroalimentacion_parts = []
-            
-            # Consejo final (priorizar)
-            if "consejo_final" in json_data and json_data["consejo_final"]:
-                retroalimentacion_parts.append(f"**Consejo final:** {json_data['consejo_final']}")
-            
-            # Análisis contextual si existe
-            if "analisis_contextual" in json_data and isinstance(json_data["analisis_contextual"], dict):
-                analisis = json_data["analisis_contextual"]
-                
-                # Coherencia
-                if "coherencia" in analisis and isinstance(analisis["coherencia"], dict):
-                    coherencia = analisis["coherencia"]
-                    retroalimentacion_parts.append(f"**Coherencia:** {coherencia.get('comentario', '')}")
-                    
-                # Cohesión
-                if "cohesion" in analisis and isinstance(analisis["cohesion"], dict):
-                    cohesion = analisis["cohesion"]
-                    retroalimentacion_parts.append(f"**Cohesión:** {cohesion.get('comentario', '')}")
-                    
-                # Registro lingüístico
-                if "registro_linguistico" in analisis and isinstance(analisis["registro_linguistico"], dict):
-                    registro = analisis["registro_linguistico"]
-                    retroalimentacion_parts.append(f"**Registro lingüístico:** {registro.get('adecuacion', '')}")
-            
-            # Unir partes de retroalimentación
-            retroalimentacion = "\n\n".join(retroalimentacion_parts) if retroalimentacion_parts else ""
-            
-            # Calcular puntuación general (promedio de puntuaciones en análisis contextual)
-            puntuaciones = []
-            
-            if "analisis_contextual" in json_data and isinstance(json_data["analisis_contextual"], dict):
-                analisis = json_data["analisis_contextual"]
-                
-                for categoria in ["coherencia", "cohesion", "registro_linguistico", "adecuacion_cultural"]:
-                    if categoria in analisis and isinstance(analisis[categoria], dict):
-                        if "puntuacion" in analisis[categoria]:
-                            try:
-                                puntuacion = float(analisis[categoria]["puntuacion"])
-                                puntuaciones.append(puntuacion)
-                            except (ValueError, TypeError):
-                                pass
-            
-            # Calcular promedio de puntuaciones
-            puntuacion_general = sum(puntuaciones) / len(puntuaciones) if puntuaciones else 0
-            
-            # Convertir errores al formato esperado por las funciones existentes
-            errores_formateados = []
-            
-            if "errores" in json_data and isinstance(json_data["errores"], dict):
-                errores = json_data["errores"]
-                
-                for categoria, lista_errores in errores.items():
-                    if isinstance(lista_errores, list):
-                        ejemplos = []
-                        
-                        for error in lista_errores:
-                            if isinstance(error, dict):
-                                ejemplo = {
-                                    "texto": error.get("fragmento_erroneo", ""),
-                                    "sugerencia": error.get("correccion", ""),
-                                    "explicacion": error.get("explicacion", "")
-                                }
-                                ejemplos.append(ejemplo)
-                        
-                        errores_formateados.append({
-                            "categoria": categoria,
-                            "cantidad": len(lista_errores),
-                            "ejemplos": ejemplos
-                        })
-            
-            # Convertir a formato JSON para el histórico
-            errores_json = json.dumps(errores_formateados)
-            
-            # Extraer conteo de errores para estadísticas
-            conteo_errores = {}
-            
-            # Mapeo de nombres de categorías
-            categoria_mapping = {
-                "Gramática": "gramatica",
-                "Léxico": "lexico",
-                "Puntuación": "puntuacion",
-                "Estructura textual": "estructura_textual",
-                "Estilo": "estilo"
-            }
-            
-            if "errores" in json_data and isinstance(json_data["errores"], dict):
-                errores = json_data["errores"]
-                
-                for categoria, lista_errores in errores.items():
-                    if isinstance(lista_errores, list):
-                        # Usar nombre normalizado si existe en el mapeo
-                        categoria_norm = categoria_mapping.get(categoria, categoria.lower())
-                        conteo_errores[categoria_norm] = len(lista_errores)
-            
-            # Actualizar estadísticas en Firestore si hay conteo de errores y UID
-            if conteo_errores and uid:
-                try:
-                    from core.firebase_client import actualizar_conteo_errores
-                    actualizar_conteo_errores(uid, conteo_errores)
-                    logger.info(f"Conteo de errores actualizado para usuario {uid}: {conteo_errores}")
-                except Exception as e:
-                    logger.error(f"Error actualizando conteo de errores: {e}")
-            
-            # Construir resultado
-            resultado = {
-                "texto_original": texto,
-                "texto_corregido": texto_corregido,
-                "retroalimentacion": retroalimentacion,
-                "puntuacion": puntuacion_general,
-                "json_errores": json_errores,
-                "errores": errores_formateados,
-                "nivel": nivel,
-                "tipo_texto": tipo_texto,
-                "conteo_errores": conteo_errores,
-                # Añadir análisis contextual completo para nuevas visualizaciones
-                "analisis_contextual": json_data.get("analisis_contextual", {}),
-                "consejo_final": json_data.get("consejo_final", "")
-            }
-            
-            # Guardar corrección en Firebase si hay UID
-            if uid:
-                try:
-                    guardar_datos = {
-                        "uid": uid,
-                        "texto_original": texto,
-                        "texto_corregido": texto_corregido,
-                        "retroalimentacion": retroalimentacion,
-                        "errores": errores_formateados,
-                        "nivel": nivel,
-                        "tipo_texto": tipo_texto,
-                        "timestamp": time.time(),
-                        "fecha": datetime.now().isoformat(),
-                        "puntuacion": puntuacion_general,
-                        "conteo_errores": conteo_errores,
-                        # Añadir análisis contextual para histórico completo
-                        "analisis_contextual": json_data.get("analisis_contextual", {}),
-                        "consejo_final": json_data.get("consejo_final", "")
-                    }
-                    from core.firebase_client import guardar_correccion_firebase
-                    guardar_correccion_firebase(guardar_datos)
-                except Exception as e:
-                    logger.error(f"Error guardando corrección en Firebase: {e}")
-            
-            # Devolver resultado para visualización
-            return resultado
-            
-        except Exception as e:
-            logger.error(f"Error procesando resultado: {e}")
-            # En caso de error, devolver un resultado básico
+        except Exception as api_error:
+            logger.error(f"Error en API del asistente: {str(api_error)}")
             return {
-                "texto_original": texto,
-                "texto_corregido": contenido if isinstance(contenido, str) else str(contenido),
-                "retroalimentacion": "Error procesando la respuesta del asistente.",
-                "puntuacion": 0,
-                "json_errores": "",
-                "errores": [],
-                "nivel": nivel,
-                "tipo_texto": tipo_texto,
-                "conteo_errores": {},
-                "analisis_contextual": {},
-                "consejo_final": ""
+                "error": True,
+                "mensaje": "Error de comunicación con el servicio. Por favor, inténtalo de nuevo.",
+                "texto_original": texto_input
+            }
+        
+        # Validar la respuesta del asistente
+        if content is None and data is None:
+            logger.error("No se obtuvo respuesta del asistente (content y data son None)")
+            return {
+                "error": True,
+                "mensaje": "No se pudo obtener una respuesta del servicio. Por favor, inténtalo de nuevo más tarde.",
+                "texto_original": texto_input
+            }
+        
+        # Intentamos extraer la respuesta JSON del contenido
+        json_data = None
+        
+        # Si tenemos data, intentamos usarla primero
+        if data is not None and isinstance(data, dict):
+            json_data = data
+            logger.info("Usando datos del objeto 'data'")
+        
+        # Si no tenemos data útil pero tenemos content, intentamos extraer JSON de él
+        if (json_data is None or json_data == {}) and content:
+            try:
+                # Intentar extraer JSON con regex
+                logger.info("Intentando extraer JSON del content")
+                json_match = re.search(r'```json\s*([\s\S]*?)\s*```', content)
+                if json_match:
+                    json_str = json_match.group(1)
+                    try:
+                        json_data = json.loads(json_str)
+                        logger.info("JSON extraído correctamente del content con regex")
+                    except json.JSONDecodeError as je:
+                        logger.warning(f"Error decodificando JSON dentro de bloques de código: {str(je)}")
+                
+                # Si no hay coincidencia, intentar parsear todo el content
+                if not json_data:
+                    try:
+                        json_data = json.loads(content)
+                        logger.info("Content completo procesado como JSON")
+                    except json.JSONDecodeError as je:
+                        logger.warning(f"El content no es un JSON válido: {str(je)}")
+                        
+                        # Último recurso: buscar cualquier cosa que parezca JSON
+                        possible_json = re.search(r'({[\s\S]*})', content)
+                        if possible_json:
+                            try:
+                                json_data = json.loads(possible_json.group(1))
+                                logger.info("Extraído posible JSON del content con regex general")
+                            except json.JSONDecodeError:
+                                logger.warning("No se pudo extraer JSON con regex general")
+            except Exception as extract_error:
+                logger.error(f"Error extrayendo JSON: {str(extract_error)}")
+        
+        # Si no pudimos extraer JSON, creamos una respuesta básica
+        if not json_data:
+            logger.warning("No se pudo extraer JSON válido de la respuesta")
+            result = {
+                "error": True,
+                "mensaje": "No se pudo procesar la respuesta del servicio",
+                "texto_original": texto_input,
+                "texto_corregido": content if content else "No se generó corrección"
+            }
+            return result
+        
+        # Añadir texto original si no está incluido
+        if "texto_original" not in json_data:
+            json_data["texto_original"] = texto_input
+            
+        # Verificar que tenemos la estructura esperada del JSON
+        # El Assistant debe devolver un objeto con la estructura específica
+        if "errores" not in json_data or not isinstance(json_data.get("errores"), dict):
+            logger.warning(f"La estructura de errores no es la esperada: {type(json_data.get('errores', None))}")
+            
+            # Si errores no es un diccionario pero tenemos el texto corregido,
+            # generamos una respuesta básica
+            if "texto_corregido" in json_data:
+                result = {
+                    "texto_original": texto_input,
+                    "texto_corregido": json_data["texto_corregido"],
+                    "errores": {"Gramática": [], "Léxico": [], "Puntuación": [], "Estructura textual": []},
+                    "analisis_contextual": {},
+                    "consejo_final": json_data.get("consejo_final", "")
+                }
+                return result
+            else:
+                # Si no tenemos ni errores ni texto corregido, es un error
+                logger.error("JSON sin estructura esperada y sin texto_corregido")
+                return {
+                    "error": True,
+                    "mensaje": "La respuesta del servicio no tiene el formato esperado",
+                    "texto_original": texto_input
+                }
+        
+        # A partir de aquí tenemos un JSON válido con la estructura esperada
+        # Registrar corrección en Firebase si hay usuario
+        if user_id:
+            try:
+                from core.firebase_client import save_correccion
+                
+                # Contar errores por categoría
+                errores_conteo = {}
+                errores = json_data.get("errores", {})
+                for categoria, lista_errores in errores.items():
+                    errores_conteo[categoria] = len(lista_errores) if isinstance(lista_errores, list) else 0
+                
+                # Guardar en Firebase
+                save_correccion(
+                    user_id=user_id,
+                    texto_original=texto_input,
+                    texto_corregido=json_data.get("texto_corregido", ""),
+                    nivel=nivel,
+                    errores=errores_conteo,
+                    puntuacion=json_data.get("puntuacion", 8.0)  # Usar valor del json o valor por defecto
+                )
+                
+                logger.info(f"Corrección guardada para usuario {user_id}")
+            except Exception as firebase_error:
+                logger.error(f"Error guardando corrección en Firebase: {str(firebase_error)}")
+        
+        # Éxito - devolver los datos procesados
+        logger.info("Procesamiento completado con éxito")
+        return json_data
+        
+    except Exception as e:
+        # Capturar detalles completos del error para diagnóstico
+        error_details = traceback.format_exc()
+        logger.error(f"Error corrigiendo texto: {str(e)}")
+        logger.error(f"Detalles del error:\n{error_details}")
+        
+        # Crear respuesta de error con información útil
+        error_response = {
+            "error": True,
+            "mensaje": f"Se produjo un error durante la corrección: {str(e)}",
+            "texto_original": texto_input if 'texto_input' in locals() else "No disponible"
+        }
+        
+        # Añadir información detallada de depuración
+        if IS_DEV:
+            error_response["debug_info"] = {
+                "error_message": str(e),
+                "error_type": str(type(e)),
+                "traceback": error_details
             }
             
-    except Exception as e:
-        logger.error(f"Error en corrección de texto: {str(e)}")
-        return {"error": f"Error procesando la corrección: {str(e)}"}
+        return error_response
 
-def mostrar_resultado_correccion(resultado, api_keys=None, circuit_breaker=None):
+def mostrar_resultado_correccion(resultado):
     """
-    Muestra el resultado de la corrección utilizando la nueva interfaz visual.
+    Muestra el resultado de la corrección en la interfaz.
     
     Args:
         resultado (dict): Resultado de la corrección
-        api_keys (dict, opcional): Diccionario con claves de API
-        circuit_breaker (object, opcional): Objeto CircuitBreaker para control de errores
         
     Returns:
         None
     """
     try:
-        # Verificar si hay error
-        if not resultado or "error" in resultado:
-            error_msg = resultado.get("error", "Error desconocido") if resultado else "No hay resultado disponible"
-            st.error(f"Error en la corrección: {error_msg}")
+        # Importación local para evitar importaciones circulares
+        from features.correccion_utils import display_correccion_result
+        
+        # Verificar si hay un error en el resultado
+        if not resultado:
+            st.error("No se recibió respuesta del servicio de corrección")
+            return
+            
+        if "error" in resultado and resultado["error"]:
+            mensaje_error = resultado.get("mensaje", "Error desconocido durante la corrección")
+            st.error(mensaje_error)
+            
+            # Información de depuración (solo en desarrollo)
+            if "debug_info" in resultado:
+                with st.expander("Información de depuración"):
+                    st.json(resultado["debug_info"])
+                    
+            # Sugerencias de acciones para el usuario
+            st.info("Sugerencias: Intenta con un texto más corto o verifica tu conexión a internet.")
+            
+            # Mostrar el texto original si está disponible
+            if "texto_original" in resultado:
+                with st.expander("Tu texto original"):
+                    st.write(resultado["texto_original"])
+            
             return
         
-        # Mostrar resultado con la nueva visualización
-        display_result_with_mode_toggle(resultado, api_keys, circuit_breaker)
+        # Si no hay error, mostrar el resultado normal
+        display_correccion_result(resultado)
         
     except Exception as e:
-        logger.error(f"Error mostrando resultado de corrección: {str(e)}")
-        st.error(f"Error al mostrar el resultado: {str(e)}")
+        # Capturar cualquier error en la visualización
+        error_details = traceback.format_exc()
+        logger.error(f"Error mostrando resultado: {str(e)}")
+        logger.error(f"Detalles del error:\n{error_details}")
         
+        # Mostrar mensaje al usuario
+        st.error(f"Error mostrando el resultado: {str(e)}")
+        
+        # Si tenemos el resultado original, intentar mostrar al menos el texto
+        if isinstance(resultado, dict):
+            if "texto_corregido" in resultado:
+                st.subheader("Texto corregido")
+                st.write(resultado["texto_corregido"])
+            elif "texto_original" in resultado:
+                with st.expander("Tu texto original"):
+                    st.write(resultado["texto_original"])

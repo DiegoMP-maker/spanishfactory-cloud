@@ -1257,6 +1257,72 @@ def obtener_historial_consignas(uid: str) -> List[Dict[str, Any]]:
         logger.error(f"Error obteniendo historial de consignas: {e}")
         return []
     
+def save_correccion(user_id, texto_original, texto_corregido, nivel, errores, puntuacion=None):
+    """
+    Guarda una corrección de texto en Firestore.
+    
+    Args:
+        user_id (str): ID del usuario
+        texto_original (str): Texto original sin corregir
+        texto_corregido (str): Texto ya corregido
+        nivel (str): Nivel de español del estudiante (A1-C2)
+        errores (dict): Diccionario con conteo de errores por categoría
+        puntuacion (float, opcional): Puntuación asignada a la corrección
+        
+    Returns:
+        str: ID del documento creado o None si hubo error
+    """
+    import time
+    
+    try:
+        # Verificar datos mínimos
+        if not user_id:
+            logger.warning("user_id vacío en save_correccion")
+            return None
+        
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            logger.error("No se pudo inicializar Firebase en save_correccion")
+            return None
+        
+        # Preparar datos de la corrección
+        correction_data = {
+            "uid": user_id,
+            "texto_original": texto_original,
+            "texto_corregido": texto_corregido,
+            "nivel": nivel,
+            "errores": errores,
+            "timestamp": time.time(),
+            "fecha": time.time()  # Para compatibilidad con funciones existentes
+        }
+        
+        # Añadir puntuación si está disponible
+        if puntuacion is not None:
+            correction_data["puntuacion"] = puntuacion
+        
+        # Guardar en colección de correcciones del usuario
+        doc_ref = db.collection(FIREBASE_COLLECTION_USERS).document(user_id) \
+                    .collection(FIREBASE_COLLECTION_CORRECTIONS).document()
+        
+        # Guardar
+        doc_ref.set(correction_data)
+        
+        # Actualizar conteo de errores
+        try:
+            actualizar_conteo_errores(user_id, errores)
+        except Exception as e:
+            logger.warning(f"No se pudo actualizar conteo de errores: {e}")
+        
+        logger.info(f"Corrección guardada para usuario {user_id}: {doc_ref.id}")
+        return doc_ref.id
+    
+    except Exception as e:
+        logger.error(f"Error en save_correccion: {e}")
+        return None
+
+    
 def actualizar_conteo_errores(uid, nuevos_errores):
     """
     Actualiza el conteo de errores por tipo para un usuario.

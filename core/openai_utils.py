@@ -1,73 +1,90 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Utilidades centralizadas para creación de clientes OpenAI
----------------------------------------------------------
-Este módulo proporciona funciones para crear clientes OpenAI de manera consistente
-en toda la aplicación, evitando problemas con parámetros incompatibles.
+Utilidades para OpenAI
+----------------------
+Funciones auxiliares para trabajar con la API de OpenAI.
+Compatible con la versión moderna de openai >=1.0.0.
 """
 
 import logging
+import os
 import streamlit as st
+import openai  # Import correcto para la nueva versión
 
 logger = logging.getLogger(__name__)
 
-def create_openai_client(api_key=None, **kwargs):
-    """
-    Crea un cliente OpenAI de manera consistente en toda la aplicación.
-    
-    Args:
-        api_key: API key para OpenAI (opcional)
-        **kwargs: Argumentos adicionales (serán ignorados para evitar problemas)
-        
-    Returns:
-        OpenAI client o None en caso de error
-    """
-    try:
-        # Importación dentro de la función para evitar problemas de importación circular
-        from openai import OpenAI
-        
-        # Log detallado para diagnóstico
-        logger.debug(f"Creando cliente OpenAI con api_key{'=' + api_key[:5] + '...' if api_key else ' from environment'}")
-        
-        # Crear cliente SOLO con api_key, ignorando otros parámetros
-        client = OpenAI(api_key=api_key)
-        
-        logger.info("Cliente OpenAI creado correctamente")
-        return client
-    except Exception as e:
-        logger.error(f"Error creando cliente OpenAI: {str(e)}")
-        return None
-
 def get_openai_api_key():
     """
-    Obtiene la API key de OpenAI de manera segura desde los secrets de Streamlit.
+    Obtiene la API key de OpenAI desde secrets o variable de entorno.
     
     Returns:
-        str o None: API key si está disponible, None en caso contrario
+        str: API key de OpenAI o None si no está configurada.
+    """
+    api_key = None
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    except Exception as e:
+        logger.debug(f"No se pudo obtener OPENAI_API_KEY de secrets: {str(e)}")
+    
+    if not api_key:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        
+    return api_key
+
+def configure_openai(api_key=None):
+    """
+    Configura la API key de OpenAI globalmente. No crea ninguna instancia de cliente.
+    
+    Args:
+        api_key: API key de OpenAI o None para usar st.secrets.
+        
+    Returns:
+        bool: True si la API key fue configurada correctamente, False si no hay API key.
     """
     try:
-        return st.secrets["OPENAI_API_KEY"]
+        if not api_key:
+            api_key = get_openai_api_key()
+            if not api_key:
+                logger.warning("No se pudo obtener OPENAI_API_KEY")
+                return False
+
+        # Configuración global de la API key
+        openai.api_key = api_key
+        logger.info("API key de OpenAI configurada correctamente.")
+        return True
     except Exception as e:
-        logger.warning(f"Error al obtener API Key de OpenAI: {e}")
-        return None
+        logger.error(f"Error configurando API key de OpenAI: {str(e)}")
+        return False
+
+# Función deprecated - Mantener para compatibilidad con código existente
+def create_openai_client(api_key=None):
+    """
+    DEPRECATED: No crea un cliente, solo configura la API key globalmente.
+    Use configure_openai() en su lugar.
+    
+    Args:
+        api_key: API key de OpenAI o None para usar st.secrets.
+        
+    Returns:
+        bool: True si la API key fue configurada correctamente, False si no hay API key.
+    """
+    logger.warning("create_openai_client() está obsoleto, use configure_openai() en su lugar")
+    return configure_openai(api_key)
 
 def clean_openai_clients_from_session():
     """
-    Limpia cualquier cliente OpenAI almacenado en session_state.
-    Útil para forzar la recreación de clientes después de errores.
+    Limpia los posibles objetos de cliente OpenAI de la sesión.
     """
-    try:
-        # Limpiar cliente de asistentes
-        if "assistant_client" in st.session_state:
-            logger.info("Limpiando assistant_client de session_state")
-            del st.session_state["assistant_client"]
-        
-        # Limpiar cualquier otra referencia a clientes OpenAI
-        for key in list(st.session_state.keys()):
-            if "client" in key.lower() and "openai" in key.lower():
-                logger.info(f"Limpiando {key} de session_state")
-                del st.session_state[key]
-                
-    except Exception as e:
-        logger.error(f"Error limpiando clientes OpenAI de session_state: {e}")
+    keys_to_remove = []
+    for key in st.session_state:
+        if (
+            isinstance(key, str) and 
+            ('openai' in key.lower() or 'client' in key.lower() or 'assistant' in key.lower())
+        ):
+            keys_to_remove.append(key)
+    
+    for key in keys_to_remove:
+        if key in st.session_state:
+            del st.session_state[key]
+            logger.debug(f"Eliminada clave {key} de la sesión")
