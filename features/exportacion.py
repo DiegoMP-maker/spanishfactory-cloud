@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 import traceback
 from datetime import datetime
+import uuid
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -38,6 +39,8 @@ def generar_pdf_base64(html_content, filename="correccion_ele"):
         # Utilizamos pdfkit para la conversión de HTML a PDF
         import pdfkit
         
+        logger.info("Comenzando la generación de PDF con pdfkit")
+        
         # Configuración para pdfkit
         options = {
             'page-size': 'A4',
@@ -46,13 +49,32 @@ def generar_pdf_base64(html_content, filename="correccion_ele"):
             'margin-bottom': '1cm',
             'margin-left': '1cm',
             'encoding': 'UTF-8',
+            'no-outline': None,
+            'quiet': ''
         }
         
-        # Crear el PDF en memoria
-        pdf_bytes = pdfkit.from_string(html_content, False, options=options)
+        # Intentar encontrar y usar la ruta a wkhtmltopdf
+        try:
+            import os
+            wkhtmltopdf_path = os.environ.get('WKHTMLTOPDF_PATH')
+            if wkhtmltopdf_path:
+                logger.info(f"Usando ruta de wkhtmltopdf: {wkhtmltopdf_path}")
+                # Crear configuración con la ruta
+                config = pdfkit.configuration(wkhtmltopdf=wkhtmltopdf_path)
+                # Crear el PDF en memoria con configuración específica
+                pdf_bytes = pdfkit.from_string(html_content, False, options=options, configuration=config)
+            else:
+                # Crear el PDF en memoria
+                logger.info("Usando wkhtmltopdf del sistema")
+                pdf_bytes = pdfkit.from_string(html_content, False, options=options)
+        except Exception as e:
+            logger.warning(f"Error al intentar configurar wkhtmltopdf: {str(e)}")
+            # Intentar sin configuración específica
+            pdf_bytes = pdfkit.from_string(html_content, False, options=options)
         
         # Convertir a base64
         b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+        logger.info(f"PDF generado correctamente, tamaño en bytes: {len(pdf_bytes)}")
         return b64_pdf
     except Exception as e:
         logger.error(f"Error generando PDF: {str(e)}")
@@ -342,9 +364,12 @@ def exportar_correccion_pdf(data):
         # Generar HTML del informe
         html_content = genera_html_informe_correccion(data)
         
-        # Convertir a PDF
+        # Generar un ID único para el archivo
+        unique_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"correccion_{timestamp}"
+        filename = f"correccion_{timestamp}_{unique_id}"
+        
+        # Convertir a PDF
         b64_pdf = generar_pdf_base64(html_content, filename)
         
         if not b64_pdf:
@@ -352,29 +377,43 @@ def exportar_correccion_pdf(data):
             st.error("Error al generar el PDF. Asegúrate de tener wkhtmltopdf instalado.")
             return False
         
-        # Crear enlace de descarga visible
-        href = f'<a href="data:application/pdf;base64,{b64_pdf}" download="{filename}.pdf" target="_blank">📥 Descargar PDF</a>'
+        # Método 1: Enlace directo de descarga
+        href = f'''
+        <a id="pdf_download_{unique_id}" 
+           href="data:application/pdf;base64,{b64_pdf}" 
+           download="{filename}.pdf" 
+           style="display: inline-block; padding: 0.5rem 1rem; 
+                  background-color: #4CAF50; color: white; 
+                  text-decoration: none; border-radius: 4px;">
+           📥 Descargar PDF
+        </a>
+        '''
         st.markdown(href, unsafe_allow_html=True)
         
-        # Agregar también js para descarga automática
-        js_code = f'''
+        # Método 2: Forzar la descarga con JavaScript
+        auto_download_js = f'''
         <script>
             (function() {{
+                // Crear un enlace invisible
                 var link = document.createElement('a');
                 link.href = 'data:application/pdf;base64,{b64_pdf}';
                 link.download = '{filename}.pdf';
                 link.style.display = 'none';
+                
+                // Añadir al DOM, hacer clic y eliminar
                 document.body.appendChild(link);
                 link.click();
+                
+                // Esperar un poco antes de eliminarlo
                 setTimeout(function() {{
                     document.body.removeChild(link);
                 }}, 100);
             }})();
         </script>
         '''
-        st.components.v1.html(js_code, height=0)
+        st.components.v1.html(auto_download_js, height=0)
         
-        logger.info("PDF generado correctamente")
+        logger.info(f"PDF generado correctamente: {filename}.pdf")
         return True
     except Exception as e:
         logger.error(f"Error exportando a PDF: {str(e)}")
@@ -382,47 +421,218 @@ def exportar_correccion_pdf(data):
         st.error(f"Error al exportar a PDF: {str(e)}")
         return False
 
-def mostrar_opciones_exportacion(data, prefix="correccion"):
+def exportar_correccion_word(data):
     """
-    Muestra las opciones de exportación en la interfaz de Streamlit.
+    Exporta una corrección a documento Word y genera un enlace de descarga.
     
     Args:
-        data (dict): Datos a exportar
-        prefix (str): Prefijo para los nombres de archivo
+        data (dict): Datos de la corrección
         
     Returns:
-        None
+        bool: True si se exportó correctamente, False en caso contrario
     """
     try:
-        logger.info("Mostrando opciones de exportación")
-        st.write("### Exportar")
+        logger.info("Iniciando exportación a Word")
         
-        # Generar un identificador único para esta instancia
-        # Usar una combinación del timestamp y un identificador aleatorio
-        import time
-        import random
-        unique_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+        # Crear un nuevo documento Word
+        doc = Document()
         
-        col1, col2 = st.columns(2)
+        # Configurar márgenes del documento
+        sections = doc.sections
+        for section in sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1)
+            section.right_margin = Inches(1)
         
-        with col1:
-            # Botón para Word con clave única
-            if st.button("📄 Exportar a Word", key=f"export_word_btn_{unique_id}", use_container_width=True):
-                result = exportar_correccion_word(data)
-                if result:
-                    st.success("Exportación a Word completada. El archivo se descargará automáticamente.")
-                else:
-                    st.error("Error al generar el documento Word.")
+        # Título
+        titulo = doc.add_heading("Informe de Corrección de Texto - ELE", level=1)
+        titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        with col2:
-            # Botón para PDF con clave única
-            if st.button("📑 Exportar a PDF", key=f"export_pdf_btn_{unique_id}", use_container_width=True):
-                result = exportar_correccion_pdf(data)
-                if result:
-                    st.success("Exportación a PDF completada. El archivo se descargará automáticamente.")
-                else:
-                    st.error("Error al generar el PDF. Asegúrate de tener wkhtmltopdf instalado.")
+        # Información del estudiante
+        info_alumno = get_user_info()
+        if info_alumno:
+            doc.add_heading("Información del Estudiante", level=2)
+            p = doc.add_paragraph()
+            p.add_run("Nombre: ").bold = True
+            p.add_run(f"{info_alumno.get('nombre', 'No especificado')} {info_alumno.get('apellido', '')}")
+            
+            p = doc.add_paragraph()
+            p.add_run("Nivel: ").bold = True
+            p.add_run(f"{info_alumno.get('nivel', 'No especificado')}")
+        
+        # Fecha y hora
+        p = doc.add_paragraph()
+        p.add_run("Fecha: ").bold = True
+        p.add_run(datetime.now().strftime("%d/%m/%Y %H:%M"))
+        
+        # Texto original
+        doc.add_heading("Texto Original", level=2)
+        doc.add_paragraph(data.get("texto_original", ""))
+        
+        # Texto corregido
+        doc.add_heading("Texto Corregido", level=2)
+        corregido_limpio = clean_html_tags(data.get("texto_corregido", ""))
+        doc.add_paragraph(corregido_limpio)
+        
+        # Análisis de errores
+        doc.add_heading("Análisis de Errores", level=2)
+        
+        errores = data.get("errores", {})
+        if errores:
+            for categoria, lista_errores in errores.items():
+                if lista_errores:
+                    doc.add_heading(f"{categoria} ({len(lista_errores)})", level=3)
+                    
+                    # Crear tabla para errores
+                    table = doc.add_table(rows=1, cols=3)
+                    table.style = 'Table Grid'
+                    
+                    # Encabezados
+                    hdr_cells = table.rows[0].cells
+                    hdr_cells[0].text = "Error"
+                    hdr_cells[1].text = "Corrección"
+                    hdr_cells[2].text = "Explicación"
+                    
+                    # Contenido
+                    for error in lista_errores:
+                        row_cells = table.add_row().cells
+                        row_cells[0].text = error.get("fragmento_erroneo", "")
+                        row_cells[1].text = error.get("correccion", "")
+                        row_cells[2].text = error.get("explicacion", "")
+        else:
+            doc.add_paragraph("No se detectaron errores.")
+        
+        # Análisis contextual
+        doc.add_heading("Análisis Contextual", level=2)
+        
+        analisis = data.get("analisis_contextual", {})
+        if analisis:
+            # Coherencia
+            if "coherencia" in analisis:
+                coherencia = analisis["coherencia"]
+                doc.add_heading(f"Coherencia ({coherencia.get('puntuacion', 0)}/10)", level=3)
+                doc.add_paragraph(coherencia.get('comentario', ''))
+                
+                if "sugerencias" in coherencia and coherencia["sugerencias"]:
+                    p = doc.add_paragraph()
+                    p.add_run("Sugerencias:").bold = True
+                    
+                    for sugerencia in coherencia["sugerencias"]:
+                        doc.add_paragraph(sugerencia, style='List Bullet')
+            
+            # Cohesión
+            if "cohesion" in analisis:
+                cohesion = analisis["cohesion"]
+                doc.add_heading(f"Cohesión ({cohesion.get('puntuacion', 0)}/10)", level=3)
+                doc.add_paragraph(cohesion.get('comentario', ''))
+                
+                if "sugerencias" in cohesion and cohesion["sugerencias"]:
+                    p = doc.add_paragraph()
+                    p.add_run("Sugerencias:").bold = True
+                    
+                    for sugerencia in cohesion["sugerencias"]:
+                        doc.add_paragraph(sugerencia, style='List Bullet')
+            
+            # Registro lingüístico
+            if "registro_linguistico" in analisis:
+                registro = analisis["registro_linguistico"]
+                doc.add_heading(f"Registro lingüístico ({registro.get('puntuacion', 0)}/10)", level=3)
+                
+                p = doc.add_paragraph()
+                p.add_run("Tipo detectado: ").bold = True
+                p.add_run(registro.get('tipo_detectado', ''))
+                
+                doc.add_paragraph(registro.get('adecuacion', ''))
+                
+                if "sugerencias" in registro and registro["sugerencias"]:
+                    p = doc.add_paragraph()
+                    p.add_run("Sugerencias:").bold = True
+                    
+                    for sugerencia in registro["sugerencias"]:
+                        doc.add_paragraph(sugerencia, style='List Bullet')
+            
+            # Adecuación cultural
+            if "adecuacion_cultural" in analisis:
+                adecuacion = analisis["adecuacion_cultural"]
+                doc.add_heading(f"Adecuación cultural ({adecuacion.get('puntuacion', 0)}/10)", level=3)
+                doc.add_paragraph(adecuacion.get('comentario', ''))
+                
+                if "elementos_destacables" in adecuacion and adecuacion["elementos_destacables"]:
+                    p = doc.add_paragraph()
+                    p.add_run("Elementos destacables:").bold = True
+                    
+                    for elemento in adecuacion["elementos_destacables"]:
+                        doc.add_paragraph(elemento, style='List Bullet')
+                
+                if "sugerencias" in adecuacion and adecuacion["sugerencias"]:
+                    p = doc.add_paragraph()
+                    p.add_run("Sugerencias:").bold = True
+                    
+                    for sugerencia in adecuacion["sugerencias"]:
+                        doc.add_paragraph(sugerencia, style='List Bullet')
+        else:
+            doc.add_paragraph("No hay análisis contextual disponible.")
+        
+        # Consejo final
+        doc.add_heading("Consejo Final", level=2)
+        doc.add_paragraph(data.get("consejo_final", ""))
+        
+        # Pie de página
+        doc.add_paragraph(f"Generado por Textocorrector ELE - {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        
+        # Guardar el documento en memoria
+        f = io.BytesIO()
+        doc.save(f)
+        f.seek(0)
+        doc_bytes = f.getvalue()
+        
+        # Generar un ID único para el archivo
+        unique_id = str(uuid.uuid4())[:8]
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"correccion_{timestamp}_{unique_id}.docx"
+        
+        # Método 1: Enlace directo de descarga
+        b64_doc = base64.b64encode(doc_bytes).decode()
+        href = f'''
+        <a id="word_download_{unique_id}" 
+           href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64_doc}" 
+           download="{filename}" 
+           style="display: inline-block; padding: 0.5rem 1rem; 
+                  background-color: #2196F3; color: white; 
+                  text-decoration: none; border-radius: 4px;">
+           📥 Descargar Word
+        </a>
+        '''
+        st.markdown(href, unsafe_allow_html=True)
+        
+        # Método 2: Forzar la descarga con JavaScript
+        auto_download_js = f'''
+        <script>
+            (function() {{
+                // Crear un enlace invisible
+                var link = document.createElement('a');
+                link.href = 'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64_doc}';
+                link.download = '{filename}';
+                link.style.display = 'none';
+                
+                // Añadir al DOM, hacer clic y eliminar
+                document.body.appendChild(link);
+                link.click();
+                
+                // Esperar un poco antes de eliminarlo
+                setTimeout(function() {{
+                    document.body.removeChild(link);
+                }}, 100);
+            }})();
+        </script>
+        '''
+        st.components.v1.html(auto_download_js, height=0)
+        
+        logger.info(f"Documento Word generado correctamente: {filename}")
+        return True
     except Exception as e:
-        logger.error(f"Error mostrando opciones de exportación: {str(e)}")
+        logger.error(f"Error exportando a Word: {str(e)}")
         logger.debug(traceback.format_exc())
-        st.error(f"Error al mostrar opciones de exportación: {str(e)}")
+        st.error(f"Error al exportar a Word: {str(e)}")
+        return False
