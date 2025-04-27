@@ -9,6 +9,7 @@ con el resto de la aplicación.
 
 import logging
 import streamlit as st
+import time
 
 # Importaciones de módulos del proyecto
 from core.clean_openai_assistant import get_clean_openai_assistants_client
@@ -129,6 +130,21 @@ def process_with_assistant(system_message, user_message, task_type="default", th
         logger.error("No se pudo obtener cliente de OpenAI Assistants")
         return None, {"error": "No se pudo conectar con el servicio de asistentes"}
     
+    # Añadir logging para verificar el system_message
+    system_message_info = f"System message - Longitud: {len(system_message)} caracteres"
+    if len(system_message) > 0:
+        # Mostrar los primeros y últimos 100 caracteres para verificar sin revelar todo el contenido
+        inicio = system_message[:100].replace('\n', ' ').strip()
+        fin = system_message[-100:].replace('\n', ' ').strip()
+        system_message_info += f"\nInicio: {inicio}...\nFin: ...{fin}"
+        logger.info(system_message_info)
+    else:
+        logger.warning("⚠️ ADVERTENCIA: system_message está vacío - el asistente usará sus instrucciones por defecto")
+    
+    # Registrar información del proceso
+    start_time = time.time()
+    logger.info(f"Procesando mensaje con asistente - Tipo: {task_type}, Thread existente: {bool(thread_id)}")
+    
     # Procesar con el asistente, pasando el user_id para permitir la integración del perfil
     content, data = assistants_client.get_completion(
         system_message=system_message,
@@ -137,6 +153,10 @@ def process_with_assistant(system_message, user_message, task_type="default", th
         thread_id=thread_id,
         user_id=user_id
     )
+    
+    # Registrar tiempo de respuesta
+    elapsed_time = time.time() - start_time
+    logger.info(f"Asistente respondió en {elapsed_time:.2f} segundos")
     
     # Si obtenemos un nuevo thread_id, guardarlo
     if isinstance(data, dict) and "thread_id" in data:
