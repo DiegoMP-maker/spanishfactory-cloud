@@ -12,7 +12,8 @@ import re
 import traceback
 import streamlit as st
 
-from core.openai_integration import process_with_assistant, get_user_profile_data
+from core.openai_integration import process_with_assistant
+from core.clean_openai_assistant import get_student_profile as get_user_profile_data
 from core.circuit_breaker import circuit_breaker
 from core.session_manager import get_user_info, get_session_var
 from config.settings import NIVELES_ESPANOL
