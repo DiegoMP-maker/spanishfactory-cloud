@@ -29,6 +29,34 @@ class FirebaseWebAPIKeyMissingError(Exception):
 firebase_initialized = False
 db = None
 
+# Definición de estructura y valores por defecto para el perfil extendido del estudiante
+STUDENT_PROFILE_SCHEMA = {
+    # Datos básicos del perfil
+    "nivel": "B1",  # Nivel MCER por defecto (A1-C2)
+    "idioma_nativo": "",  # Idioma nativo del estudiante
+    
+    # Objetivos de aprendizaje y preferencias
+    "objetivos_aprendizaje": [],  # Lista de objetivos específicos (ej. ["Mejorar fluidez", "Preparar DELE"])
+    "areas_interes": [],  # Áreas de interés temático (ej. ["Literatura", "Negocios"])
+    
+    # Preferencias de feedback
+    "preferencias_feedback": {
+        "estilo": "detallado",  # Opciones: "detallado", "resumido", "enfocado"
+        "priorizar_areas": []   # Áreas a priorizar en feedback (ej. ["gramática", "vocabulario"])
+    },
+    
+    # Datos de progreso y estadísticas
+    "errores_por_tipo": {
+        "gramatica": 0,
+        "lexico": 0,
+        "puntuacion": 0,
+        "estructura_textual": 0,
+        "estilo": 0
+    },
+    "numero_correcciones": 0,
+    "ultima_correccion": None
+}
+
 def initialize_firebase():
     """
     Inicializa la conexión con Firebase.
@@ -427,9 +455,16 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             try:
                 db, success = initialize_firebase()
                 if success and db:
-                    db.collection(FIREBASE_COLLECTION_USERS).document(uid).update({
+                    # Actualizar información de login
+                    update_data = {
                         "ultimo_login": time.time()
-                    })
+                    }
+                    
+                    # Verificar si hay que completar campos de perfil
+                    ensure_profile_fields(uid)
+                    
+                    # Actualizar documento
+                    db.collection(FIREBASE_COLLECTION_USERS).document(uid).update(update_data)
             except Exception as e:
                 logger.warning(f"No se pudo actualizar último login: {e}")
             
@@ -548,6 +583,9 @@ def create_user(email: str, password: str, user_data: Dict[str, Any]) -> Dict[st
                 user_data["creado"] = current_time
                 user_data["ultimo_login"] = current_time
                 
+                # Añadir campos del perfil expandido
+                user_data = initialize_user_profile(user_data)
+                
                 # Guardar en Firestore
                 db.collection(FIREBASE_COLLECTION_USERS).document(uid).set(user_data)
             else:
@@ -593,10 +631,85 @@ def create_user(email: str, password: str, user_data: Dict[str, Any]) -> Dict[st
         logger.error(f"Error en create_user: {str(e)}")
         circuit_breaker.record_failure("firebase_auth", error_type="general")
         return {"error": f"Error durante el proceso de crear usuario: {str(e)}"}
+
+def initialize_user_profile(user_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Inicializa los campos de perfil expandido para un nuevo usuario.
+    
+    Args:
+        user_data: Datos básicos del usuario
+        
+    Returns:
+        dict: Datos del usuario con campos de perfil expandido añadidos
+    """
+    # Clonar datos del usuario para no modificar el original
+    profile_data = user_data.copy()
+    
+    # Iterar sobre el esquema del perfil
+    for field, default_value in STUDENT_PROFILE_SCHEMA.items():
+        # Si el campo ya existe en user_data, respetarlo
+        if field not in profile_data:
+            profile_data[field] = default_value
+    
+    logger.info(f"Perfil inicializado para nuevo usuario")
+    return profile_data
+
+def ensure_profile_fields(uid: str) -> bool:
+    """
+    Asegura que el usuario tenga todos los campos del perfil expandido.
+    Si algún campo falta, lo añade con valor por defecto.
+    
+    Args:
+        uid: ID del usuario
+        
+    Returns:
+        bool: True si se actualizó el perfil, False en caso contrario
+    """
+    try:
+        if not uid:
+            logger.warning("UID vacío en ensure_profile_fields")
+            return False
+        
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            logger.error("No se pudo inicializar Firebase en ensure_profile_fields")
+            return False
+        
+        # Obtener documento del usuario
+        doc_ref = db.collection(FIREBASE_COLLECTION_USERS).document(uid)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            logger.warning(f"No se encontró documento para uid: {uid}")
+            return False
+        
+        # Obtener datos actuales
+        user_data = doc.to_dict()
+        
+        # Verificar si faltan campos del perfil
+        missing_fields = {}
+        for field, default_value in STUDENT_PROFILE_SCHEMA.items():
+            if field not in user_data:
+                missing_fields[field] = default_value
+        
+        # Si hay campos faltantes, actualizarlos
+        if missing_fields:
+            logger.info(f"Añadiendo {len(missing_fields)} campos faltantes al perfil del usuario {uid}")
+            doc_ref.update(missing_fields)
+            return True
+        
+        return False
+    
+    except Exception as e:
+        logger.error(f"Error en ensure_profile_fields: {e}")
+        return False
     
 def get_user_data(uid: str) -> Dict[str, Any]:
     """
     Obtiene los datos de un usuario desde Firestore.
+    También verifica y completa campos de perfil si faltan.
     
     Args:
         uid: ID del usuario
@@ -623,6 +736,17 @@ def get_user_data(uid: str) -> Dict[str, Any]:
         if doc.exists:
             # Convertir a diccionario
             user_data = doc.to_dict()
+            
+            # Asegurar que el perfil está completo
+            # Si faltan campos, actualizarlos silenciosamente
+            try:
+                if ensure_profile_fields(uid):
+                    # Si se actualizaron campos, volver a obtener los datos
+                    doc = doc_ref.get()
+                    user_data = doc.to_dict()
+            except Exception as profile_error:
+                logger.warning(f"Error completando campos de perfil: {profile_error}")
+            
             return user_data
         else:
             logger.warning(f"No se encontró documento para uid: {uid}")
@@ -663,6 +787,44 @@ def update_user_data(uid: str, data: Dict[str, Any]) -> bool:
     
     except Exception as e:
         logger.error(f"Error en update_user_data: {e}")
+        return False
+
+def update_user_profile(uid: str, profile_data: Dict[str, Any]) -> bool:
+    """
+    Actualiza los datos de perfil de un usuario, validando la estructura.
+    
+    Args:
+        uid: ID del usuario
+        profile_data: Datos de perfil a actualizar
+        
+    Returns:
+        bool: True si la actualización fue exitosa, False en caso contrario
+    """
+    try:
+        if not uid:
+            logger.warning("UID vacío en update_user_profile")
+            return False
+        
+        # Validar campos permitidos
+        valid_fields = set(STUDENT_PROFILE_SCHEMA.keys())
+        update_data = {}
+        
+        for field, value in profile_data.items():
+            if field in valid_fields:
+                update_data[field] = value
+            else:
+                logger.warning(f"Campo de perfil no reconocido: {field} - ignorado")
+        
+        # Si no hay campos válidos, salir
+        if not update_data:
+            logger.warning("No se encontraron campos válidos para actualizar")
+            return False
+        
+        # Actualizar datos
+        return update_user_data(uid, update_data)
+    
+    except Exception as e:
+        logger.error(f"Error en update_user_profile: {e}")
         return False
 
 def get_user_thread(uid: str) -> Optional[str]:
@@ -754,6 +916,8 @@ def save_user_thread(uid: str, thread_id: str, email: str = None) -> bool:
             # Crear documento nuevo
             data["uid"] = uid
             data["creado"] = time.time()
+            # Inicializar perfil completo
+            data = initialize_user_profile(data)
             doc_ref.set(data)
         
         logger.info(f"Thread {thread_id} guardado para usuario {uid}")
@@ -1072,47 +1236,6 @@ def guardar_correccion_firebase(datos: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error(f"Error guardando corrección: {e}")
         return False
-    
-# Añadir después de la función guardar_correccion_firebase que ya existe
-
-def guardar_correccion_firebase(datos):
-    """
-    Guarda datos de una corrección en Firebase.
-    
-    Args:
-        datos: Datos de la corrección
-        
-    Returns:
-        bool: True si se guardó correctamente, False en caso contrario
-    """
-    try:
-        # Obtener UID
-        uid = datos.get("uid")
-        if not uid:
-            logger.warning("UID vacío en guardar_correccion_firebase")
-            return False
-        
-        # Inicializar Firebase
-        db, success = initialize_firebase()
-        
-        if not success or not db:
-            logger.error("No se pudo inicializar Firebase")
-            return False
-        
-        # Guardar en Firestore
-        coleccion_ref = db.collection(FIREBASE_COLLECTION_USERS).document(uid) \
-                          .collection(FIREBASE_COLLECTION_CORRECTIONS)
-                          
-        # Añadir documento sin ID específico
-        coleccion_ref.add(datos)
-        
-        logger.info(f"Corrección guardada para usuario {uid}")
-        return True
-    
-    except Exception as e:
-        logger.error(f"Error guardando corrección: {e}")
-        return False
-    
 
 def guardar_resultado_simulacro(datos: Dict[str, Any]) -> bool:
     """
@@ -1490,7 +1613,6 @@ def actualizar_conteo_errores(uid, nuevos_errores):
         
         # Referencia al documento del usuario
         doc_ref = db.collection(FIREBASE_COLLECTION_USERS).document(uid)
-        
         # Realizar actualización en una transacción
         @firestore.transactional
         def actualizar_en_transaccion(transaction, ref):
@@ -1503,6 +1625,20 @@ def actualizar_conteo_errores(uid, nuevos_errores):
             
             # Obtener datos actuales
             user_data = doc.to_dict()
+            
+            # Asegurar que el usuario tenga todos los campos del perfil
+            # Esto garantiza que existe la estructura errores_por_tipo
+            missing_fields = {}
+            for field, default_value in STUDENT_PROFILE_SCHEMA.items():
+                if field not in user_data:
+                    missing_fields[field] = default_value
+            
+            if missing_fields:
+                # Actualizar campos faltantes
+                transaction.update(ref, missing_fields)
+                # Recuperar el documento actualizado
+                doc = ref.get(transaction=transaction)
+                user_data = doc.to_dict()
             
             # Inicializar o obtener estructura de errores
             errores_actuales = user_data.get("errores_por_tipo", {})
@@ -1539,4 +1675,136 @@ def actualizar_conteo_errores(uid, nuevos_errores):
     except Exception as e:
         logger.error(f"Error actualizando conteo de errores: {e}")
         return False
+
+def migrate_user_profiles():
+    """
+    Migra todos los perfiles de usuario existentes para añadir los nuevos campos del perfil expandido.
+    Útil para actualizar usuarios existentes cuando se añaden nuevos campos al esquema.
     
+    Returns:
+        tuple: (actualizados, fallidos, total) - Conteo de usuarios actualizados, fallidos y total
+    """
+    try:
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            logger.error("No se pudo inicializar Firebase en migrate_user_profiles")
+            return 0, 0, 0
+        
+        # Obtener todos los documentos de usuarios
+        users_ref = db.collection(FIREBASE_COLLECTION_USERS)
+        users_docs = users_ref.stream()
+        
+        actualizados = 0
+        fallidos = 0
+        total = 0
+        
+        # Iterar sobre cada usuario
+        for doc in users_docs:
+            total += 1
+            uid = doc.id
+            
+            try:
+                # Intentar actualizar perfil
+                if ensure_profile_fields(uid):
+                    actualizados += 1
+                    logger.info(f"Perfil actualizado para usuario {uid}")
+                else:
+                    logger.info(f"Usuario {uid} ya tiene todos los campos")
+            except Exception as user_error:
+                fallidos += 1
+                logger.error(f"Error actualizando perfil para usuario {uid}: {user_error}")
+        
+        logger.info(f"Migración completada: {actualizados} actualizados, {fallidos} fallidos, {total} total")
+        return actualizados, fallidos, total
+    
+    except Exception as e:
+        logger.error(f"Error en migrate_user_profiles: {e}")
+        return 0, 0, 0
+
+def update_all_user_thread_profiles():
+    """
+    Actualiza todos los usuarios con threads existentes, enviando un mensaje con su perfil expandido.
+    Esto asegura que todos los threads tengan información actualizada del perfil del estudiante.
+    
+    Returns:
+        tuple: (actualizados, fallidos, total) - Conteo de threads actualizados, fallidos y total
+    """
+    try:
+        # Importar módulos necesarios
+        from core.openai_integration import get_user_profile_data
+        from core.clean_openai_assistant import get_clean_openai_assistants_client
+        
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            logger.error("No se pudo inicializar Firebase en update_all_user_thread_profiles")
+            return 0, 0, 0
+        
+        # Obtener cliente de OpenAI Assistants
+        assistants_client = get_clean_openai_assistants_client()
+        if not assistants_client:
+            logger.error("No se pudo obtener cliente de OpenAI Assistants")
+            return 0, 0, 0
+        
+        # Obtener usuarios con thread_id
+        users_ref = db.collection(FIREBASE_COLLECTION_USERS)
+        users_with_thread = users_ref.where("thread_id", "!=", None).stream()
+        
+        actualizados = 0
+        fallidos = 0
+        total = 0
+        
+        # Iterar sobre cada usuario con thread
+        for doc in users_with_thread:
+            total += 1
+            uid = doc.id
+            user_data = doc.to_dict()
+            thread_id = user_data.get("thread_id")
+            
+            try:
+                # Verificar que el thread existe
+                if not assistants_client.verify_thread(thread_id):
+                    logger.warning(f"Thread inválido para usuario {uid}: {thread_id}")
+                    fallidos += 1
+                    continue
+                
+                # Obtener perfil completo
+                profile_data = get_user_profile_data(uid)
+                if not profile_data:
+                    logger.warning(f"No se pudo obtener perfil para usuario {uid}")
+                    fallidos += 1
+                    continue
+                
+                # Crear mensaje con la información de perfil
+                profile_message = f"""
+ACTUALIZACIÓN DE PERFIL DEL ESTUDIANTE:
+```json
+{json.dumps(profile_data, indent=2, ensure_ascii=False)}
+```
+
+Por favor, adapta tus correcciones según este perfil actualizado.
+"""
+                # Añadir mensaje al thread
+                message_response = assistants_client.add_message_to_thread(thread_id, profile_message)
+                
+                if message_response and "id" in message_response:
+                    actualizados += 1
+                    logger.info(f"Perfil actualizado en thread {thread_id} para usuario {uid}")
+                else:
+                    fallidos += 1
+                    logger.error(f"Error al añadir mensaje al thread {thread_id} para usuario {uid}")
+            
+            except Exception as e:
+                fallidos += 1
+                logger.error(f"Error actualizando thread para usuario {uid}: {e}")
+        
+        logger.info(f"Actualización de threads completada: {actualizados} actualizados, {fallidos} fallidos, {total} total")
+        return actualizados, fallidos, total
+    
+    except Exception as e:
+        logger.error(f"Error en update_all_user_thread_profiles: {e}")
+        return 0, 0, 0
+
