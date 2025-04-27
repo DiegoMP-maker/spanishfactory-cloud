@@ -339,6 +339,21 @@ Recuerda responder en formato json según las instrucciones.
                 "mensaje": "Error de comunicación con el servicio. Por favor, inténtalo de nuevo.",
                 "texto_original": texto_input
             }
+
+            # Loguear resultado para debug
+            logger.info(f"Recibida respuesta: content={type(content)}, data={type(data) if data is not None else None}")
+            
+            # Verificar que el system_message ha sido aplicado correctamente
+            if data and isinstance(data, dict):
+                # Verificar si la respuesta tiene la estructura esperada según el system prompt
+                estructura_correcta = all(
+                    campo in data for campo in ["saludo", "tipo_texto", "errores", "texto_corregido", "analisis_contextual", "consejo_final"]
+                )
+                if estructura_correcta:
+                    logger.info("✅ Verificación exitosa: La respuesta contiene la estructura definida en el system prompt")
+                else:
+                    campos_faltantes = [campo for campo in ["saludo", "tipo_texto", "errores", "texto_corregido", "analisis_contextual", "consejo_final"] if campo not in data]
+                    logger.warning(f"❌ Verificación fallida: Faltan campos en la respuesta: {campos_faltantes}")
         
         # Validar la respuesta del asistente
         if content is None and data is None:
