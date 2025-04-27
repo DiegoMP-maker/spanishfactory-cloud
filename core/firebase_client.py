@@ -77,14 +77,18 @@ def initialize_firebase():
                 # Crear un diccionario vacío para ir agregando los campos
                 firebase_credentials = {}
                 
-                # Patrones para extraer los campos más importantes
+                # Patrones para extraer los campos obligatorios
                 patterns = {
                     "type": r'"type"\s*:\s*"([^"]*)"',
                     "project_id": r'"project_id"\s*:\s*"([^"]*)"',
                     "private_key_id": r'"private_key_id"\s*:\s*"([^"]*)"',
                     "private_key": r'"private_key"\s*:\s*"(.*?)(?:"\s*,|\"\s*})', # Caso especial, maneja comillas internas
                     "client_email": r'"client_email"\s*:\s*"([^"]*)"',
-                    "client_id": r'"client_id"\s*:\s*"([^"]*)"'
+                    "client_id": r'"client_id"\s*:\s*"([^"]*)"',
+                    "auth_uri": r'"auth_uri"\s*:\s*"([^"]*)"',
+                    "token_uri": r'"token_uri"\s*:\s*"([^"]*)"',
+                    "auth_provider_x509_cert_url": r'"auth_provider_x509_cert_url"\s*:\s*"([^"]*)"',
+                    "client_x509_cert_url": r'"client_x509_cert_url"\s*:\s*"([^"]*)"'
                 }
                 
                 # Extraer cada campo usando su patrón correspondiente
@@ -106,6 +110,21 @@ def initialize_firebase():
                     else:
                         logger.warning(f"No se pudo extraer el campo '{field}'")
                 
+                # Si falta token_uri, establecer valor por defecto (obligatorio)
+                if "token_uri" not in firebase_credentials:
+                    firebase_credentials["token_uri"] = "https://oauth2.googleapis.com/token"
+                    logger.info("Campo 'token_uri' agregado con valor por defecto")
+                
+                # Si falta auth_uri, establecer valor por defecto
+                if "auth_uri" not in firebase_credentials:
+                    firebase_credentials["auth_uri"] = "https://accounts.google.com/o/oauth2/auth"
+                    logger.info("Campo 'auth_uri' agregado con valor por defecto")
+                
+                # Si falta auth_provider_x509_cert_url, establecer valor por defecto
+                if "auth_provider_x509_cert_url" not in firebase_credentials:
+                    firebase_credentials["auth_provider_x509_cert_url"] = "https://www.googleapis.com/oauth2/v1/certs"
+                    logger.info("Campo 'auth_provider_x509_cert_url' agregado con valor por defecto")
+                
                 # Verificar que se han extraído los campos críticos
                 for critical_field in ["type", "project_id", "private_key", "client_email"]:
                     if critical_field not in firebase_credentials:
@@ -121,19 +140,11 @@ def initialize_firebase():
                 logger.info(f"Clave privada formateada correctamente (longitud: {len(private_key)} caracteres)")
             
             # Verificar que tenemos las credenciales necesarias
-            if not firebase_credentials or not all([
-                firebase_credentials.get("type"),
-                firebase_credentials.get("project_id"),
-                firebase_credentials.get("private_key"),
-                firebase_credentials.get("client_email")
-            ]):
-                logger.error("Credenciales de Firebase incompletas en st.secrets")
-                for field in ["type", "project_id", "private_key", "client_email"]:
-                    if field not in firebase_credentials:
-                        logger.error(f"Falta campo requerido: {field}")
-                    elif not firebase_credentials[field]:
-                        logger.error(f"Campo '{field}' está vacío")
-                raise ValueError("Credenciales de Firebase incompletas")
+            required_fields = ["type", "project_id", "private_key", "client_email", "token_uri"]
+            for field in required_fields:
+                if field not in firebase_credentials:
+                    logger.error(f"Falta campo requerido: {field}")
+                    raise ValueError(f"Credenciales de Firebase incompletas: falta {field}")
             
             # Inicializar Firebase con las credenciales
             if not firebase_admin._apps:
@@ -167,14 +178,11 @@ def initialize_firebase():
                     firebase_credentials = DEFAULT_FIREBASE_CONFIG
                     
                     # Verificar que tenemos las credenciales necesarias
-                    if not firebase_credentials or not all([
-                        firebase_credentials.get("type"),
-                        firebase_credentials.get("project_id"),
-                        firebase_credentials.get("private_key"),
-                        firebase_credentials.get("client_email")
-                    ]):
-                        logger.error("Credenciales de Firebase predeterminadas incompletas")
-                        raise ValueError("Credenciales de Firebase predeterminadas incompletas")
+                    required_fields = ["type", "project_id", "private_key", "client_email", "token_uri"]
+                    for field in required_fields:
+                        if field not in firebase_credentials:
+                            logger.error(f"Falta campo requerido en credenciales predeterminadas: {field}")
+                            raise ValueError(f"Credenciales predeterminadas incompletas: falta {field}")
                     
                     # Asegurar que la private_key tenga \n reales en las credenciales predeterminadas
                     if "private_key" in firebase_credentials:
