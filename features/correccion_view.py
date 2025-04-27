@@ -15,7 +15,6 @@ from datetime import datetime
 # Importaciones para la corrección de textos
 from features.correccion import corregir_texto, mostrar_resultado_correccion
 from features.exportacion import mostrar_opciones_exportacion
-from features.correccion_utils import display_correccion_result
 from config.settings import NIVELES_ESPANOL
 
 logger = logging.getLogger(__name__)
@@ -37,6 +36,8 @@ def render_view():
         st.session_state.texto_original = ""
     if "mostrar_resultado" not in st.session_state:
         st.session_state.mostrar_resultado = False
+    if "exportacion_mostrada" not in st.session_state:
+        st.session_state.exportacion_mostrada = False
     
     # Formulario para configurar la corrección
     with st.form(key="correction_form"):
@@ -50,7 +51,7 @@ def render_view():
         )
         
         # Opciones de configuración
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns([1, 1, 1])
         
         with col1:
             # Selector de nivel
@@ -69,40 +70,96 @@ def render_view():
                 value="Intermedio",
                 help="Selecciona cuánto detalle quieres en las explicaciones"
             )
+            
+        with col3:
+            # Selector de idioma para las explicaciones
+            idioma_explicaciones = st.selectbox(
+                "Idioma de las explicaciones",
+                ["español", "inglés", "francés", "alemán", "italiano", "portugués"],
+                index=0,
+                help="Selecciona el idioma en el que quieres recibir las explicaciones"
+            )
         
         # Botón para enviar
         enviar = st.form_submit_button("Analizar texto")
         
         # Procesar cuando se envía el formulario
-        if enviar and texto_usuario:
+        if enviar:
+            # Validar que el texto no esté vacío
+            if not texto_usuario or not texto_usuario.strip():
+                st.error("Por favor, introduce un texto para analizar.")
+                return
+                
             with st.spinner("Analizando tu texto..."):
                 # Guardar texto original
                 st.session_state.texto_original = texto_usuario
+                
+                # Resetear el estado de exportación
+                st.session_state.exportacion_mostrada = False
                 
                 # Obtener información del usuario para el ID
                 from core.session_manager import get_user_info
                 user_info = get_user_info()
                 user_id = user_info.get("uid") if user_info else None
                 
-                # Procesar con la función de corrección
-                resultado = corregir_texto(
-                    texto=texto_usuario,
-                    nivel=nivel_seleccionado,
-                    detalle=nivel_detalle,
-                    user_id=user_id
-                )
+                # Mostrar mensaje de espera
+                st.info("Analizando el texto. Por favor, espera unos momentos...")
                 
-                if resultado:
-                    # Guardar resultado
+                # Procesar con la función de corrección
+                try:
+                    # Pasar el texto como texto_input (nombre correcto del parámetro)
+                    resultado = corregir_texto(
+                        texto_input=texto_usuario,
+                        nivel=nivel_seleccionado,
+                        detalle=nivel_detalle,
+                        user_id=user_id,
+                        idioma=idioma_explicaciones
+                    )
+                    
+                    # Verificar el resultado
+                    if resultado is None:
+                        st.error("No se pudo obtener una corrección. El servidor puede estar ocupado. Por favor, inténtalo de nuevo en unos momentos.")
+                        logger.error("corregir_texto() devolvió None")
+                        return
+                        
+                    # Guardar resultado (incluso si tiene error, para mostrar el mensaje apropiado)
                     st.session_state.correction_result = resultado
                     st.session_state.mostrar_resultado = True
-                else:
-                    st.error("No se pudo obtener una corrección válida. Por favor, inténtalo de nuevo.")
+                    
+                except Exception as e:
+                    st.error(f"Ocurrió un error durante el procesamiento: {str(e)}")
+                    logger.error(f"Error procesando corrección: {str(e)}")
+                    # Asegurar que el usuario no pierda su texto
+                    st.session_state.texto_original = texto_usuario
     
     # Mostrar resultados si están disponibles
     if st.session_state.mostrar_resultado and st.session_state.correction_result:
         st.markdown("---")
         st.markdown("## Resultado del análisis")
         
-        # Mostrar resultado de la corrección
-        mostrar_resultado_correccion(st.session_state.correction_result)
+        try:
+            # Mostrar resultado de la corrección
+            mostrar_resultado_correccion(st.session_state.correction_result)
+            
+            # Añadir opciones de exportación DESPUÉS de mostrar el resultado
+            # y solo si no se han mostrado antes
+            st.markdown("---")
+            
+            # Mostrar opciones de exportación una sola vez
+            if not st.session_state.exportacion_mostrada:
+                mostrar_opciones_exportacion(st.session_state.correction_result)
+                st.session_state.exportacion_mostrada = True
+            
+        except Exception as e:
+            st.error(f"Error mostrando el resultado: {str(e)}")
+            logger.error(f"Error en mostrar_resultado_correccion: {str(e)}")
+            
+            # Fallback básico para mostrar algo al usuario
+            if isinstance(st.session_state.correction_result, dict):
+                if "texto_original" in st.session_state.correction_result:
+                    with st.expander("Tu texto original"):
+                        st.write(st.session_state.correction_result.get("texto_original", ""))
+                
+                if "texto_corregido" in st.session_state.correction_result:
+                    st.subheader("Texto corregido")
+                    st.write(st.session_state.correction_result.get("texto_corregido", ""))
