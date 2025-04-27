@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def extract_json_safely(content):
     """
-    Extrae JSON válido de una cadena de texto con manejo de errores.
+    Extrae JSON válido de una cadena de texto con manejo de errores mejorado.
     
     Args:
         content (str): Contenido que puede incluir JSON
@@ -35,38 +35,99 @@ def extract_json_safely(content):
         dict: Diccionario con el JSON extraído o diccionario vacío si no se encuentra
     """
     if not content:
+        logger.warning("Contenido vacío, no se puede extraer JSON")
         return {}
     
+    # Guardar las primeras 100 caracteres para diagnóstico
+    preview = content[:100].replace('\n', ' ') + "..." if len(content) > 100 else content
+    logger.info(f"Intentando extraer JSON del contenido. Vista previa: {preview}")
+    
     try:
-        # Primero intentar parsear directamente
+        # 1. Primero intentar parsear directamente todo el contenido
         try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            pass
+            result = json.loads(content)
+            logger.info("✅ Éxito: JSON extraído directamente del contenido completo")
+            return result
+        except json.JSONDecodeError as e:
+            logger.debug(f"No se pudo parsear directamente como JSON: {str(e)}")
         
-        # Buscar bloques de código JSON
+        # 2. Buscar bloques de código JSON con formato markdown
         import re
         json_code_blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)```', content)
-        for block in json_code_blocks:
-            try:
-                return json.loads(block.strip())
-            except json.JSONDecodeError:
-                continue
+        if json_code_blocks:
+            logger.info(f"Encontrados {len(json_code_blocks)} bloques de código que podrían contener JSON")
+            for i, block in enumerate(json_code_blocks):
+                try:
+                    result = json.loads(block.strip())
+                    logger.info(f"✅ Éxito: JSON extraído del bloque de código #{i+1}")
+                    
+                    # Verificar si el resultado tiene la estructura esperada para correcciones
+                    if "errores" in result and "texto_corregido" in result:
+                        logger.info("✅ El JSON extraído tiene la estructura esperada para correcciones")
+                    
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Bloque #{i+1} no es JSON válido: {str(e)}")
+        else:
+            logger.debug("No se encontraron bloques de código JSON con formato markdown")
         
-        # Buscar cualquier estructura JSON en el texto
+        # 3. Buscar cualquier estructura con forma de JSON en el texto
         json_match = re.search(r'({[\s\S]*})', content)
         if json_match:
+            potential_json = json_match.group(1)
             try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
+                result = json.loads(potential_json)
+                logger.info(f"✅ Éxito: JSON extraído mediante expresión regular general")
+                return result
+            except json.JSONDecodeError as e:
+                logger.debug(f"La estructura encontrada no es JSON válido: {str(e)}")
+                
+                # 4. Intentar limpiar el JSON y volver a intentar
+                # Reemplazar caracteres problemáticos comunes
+                cleaned_json = potential_json.replace('\t', ' ').replace('\n', ' ')
+                # Eliminar espacios duplicados
+                cleaned_json = re.sub(r' +', ' ', cleaned_json)
+                try:
+                    result = json.loads(cleaned_json)
+                    logger.info("✅ Éxito: JSON extraído después de limpieza básica")
+                    return result
+                except json.JSONDecodeError:
+                    logger.debug("La limpieza básica no fue suficiente")
+        else:
+            logger.debug("No se encontró ninguna estructura con forma de JSON")
+        
+        # 5. Último recurso: Buscar cualquier objeto JSON con una estructura específica de corrección
+        # Esto es específico para el formato de corrección usado en la aplicación
+        correccion_match = re.search(r'"errores"\s*:.*?"texto_corregido"\s*:', content, re.DOTALL)
+        if correccion_match:
+            logger.info("Detectada posible estructura de corrección en el texto")
+            
+            # Intentar extraer el objeto JSON completo
+            start_idx = content.rfind('{', 0, correccion_match.start())
+            end_idx = content.find('}', correccion_match.end())
+            
+            if start_idx >= 0 and end_idx >= 0:
+                potential_json = content[start_idx:end_idx+1]
+                try:
+                    result = json.loads(potential_json)
+                    logger.info("✅ Éxito: JSON extraído mediante búsqueda de estructura de corrección")
+                    return result
+                except json.JSONDecodeError:
+                    logger.debug("El fragmento extraído con la estructura de corrección no es JSON válido")
         
         # Si llegamos aquí, no hay JSON válido
-        logger.warning("No se pudo extraer JSON válido del contenido")
+        logger.warning("❌ No se pudo extraer JSON válido del contenido después de múltiples intentos")
+        # Mostrar un fragmento del contenido para diagnóstico
+        if len(content) > 200:
+            logger.debug(f"Primeros 200 caracteres del contenido: {content[:200]}")
+            logger.debug(f"Últimos 200 caracteres del contenido: {content[-200:]}")
+        else:
+            logger.debug(f"Contenido completo: {content}")
         return {}
         
     except Exception as e:
-        logger.error(f"Error extrayendo JSON del contenido: {str(e)}")
+        logger.error(f"❌ Error inesperado extrayendo JSON del contenido: {str(e)}")
+        logger.error(traceback.format_exc())
         return {}
 
 def guardar_metricas_modelo(modelo, tiempo_respuesta, longitud_texto, resultado_exitoso):
@@ -545,22 +606,60 @@ Por favor, adapta tus respuestas según este perfil actualizado.
         if self.ASSISTANT_IDS["default"] and self.get_assistant(self.ASSISTANT_IDS["default"]):
             return self.ASSISTANT_IDS["default"]
         
+        # Para el tipo de tarea de corrección de texto, asegurar que usamos el prompt correcto
+        instructions_to_use = system_message
+        if task_type == "correccion_texto":
+            # Si el system_message está vacío o es muy corto, intentar obtener el prompt completo
+            if not system_message or len(system_message) < 500:
+                try:
+                    # Importar dinámicamente para evitar dependencias circulares
+                    import sys
+                    import importlib
+                    if 'features.correccion' in sys.modules:
+                        # Si ya está importado, usarlo directamente
+                        correccion_module = sys.modules['features.correccion']
+                    else:
+                        # Si no está importado, importarlo
+                        correccion_module = importlib.import_module('features.correccion')
+                    
+                    # Acceder a la constante
+                    if hasattr(correccion_module, 'SYSTEM_PROMPT_CORRECTION'):
+                        instructions_to_use = correccion_module.SYSTEM_PROMPT_CORRECTION
+                        logger.info("✅ SYSTEM_PROMPT_CORRECTION cargado correctamente para crear asistente")
+                    else:
+                        logger.warning("⚠️ No se encontró SYSTEM_PROMPT_CORRECTION en el módulo correccion")
+                except Exception as e:
+                    logger.warning(f"⚠️ Error cargando SYSTEM_PROMPT_CORRECTION: {str(e)}")
+            else:
+                logger.info(f"Usando system_message proporcionado (longitud: {len(system_message)} caracteres)")
+        
         # 3. Buscar en caché basado en el hash del mensaje
-        instruccion_hash = hashlib.md5(f"{system_message}_{self.current_model}".encode()).hexdigest()
+        instruccion_hash = hashlib.md5(f"{instructions_to_use}_{self.current_model}".encode()).hexdigest()
         if instruccion_hash in self.assistant_cache:
             # Verificar que el asistente de caché existe
-            if self.get_assistant(self.assistant_cache[instruccion_hash]):
-                return self.assistant_cache[instruccion_hash]
+            cached_assistant_id = self.assistant_cache[instruccion_hash]
+            assistant_info = self.get_assistant(cached_assistant_id)
+            if assistant_info:
+                logger.info(f"Usando asistente existente de caché: {cached_assistant_id}")
+                return cached_assistant_id
+            else:
+                logger.warning(f"Asistente en caché {cached_assistant_id} no existe o es inaccesible")
         
         # 4. Crear un nuevo asistente
-        has_json_keyword = "json" in system_message.lower()
+        has_json_keyword = "json" in instructions_to_use.lower()
         
         if not has_json_keyword:
             logger.warning("El mensaje del sistema no contiene la palabra 'json', usando formato de respuesta abierto")
         
+        # Registrar información sobre las instrucciones utilizadas
+        instructions_info = f"Creando asistente con instrucciones - Longitud: {len(instructions_to_use)} caracteres"
+        if len(instructions_to_use) > 100:
+            instructions_info += f"\nInicio: {instructions_to_use[:50]}...\nFin: ...{instructions_to_use[-50:]}"
+        logger.info(instructions_info)
+        
         new_assistant = self.create_assistant(
             name=f"TextoCorrector ELE - {task_type}",
-            instructions=system_message,
+            instructions=instructions_to_use,
             model=self.current_model,
             json_mode=has_json_keyword
         )
@@ -568,7 +667,7 @@ Por favor, adapta tus respuestas según este perfil actualizado.
         if new_assistant and "id" in new_assistant:
             assistant_id = new_assistant["id"]
             self.assistant_cache[instruccion_hash] = assistant_id
-            logger.info(f"Creado nuevo asistente para {task_type} con ID: {assistant_id}")
+            logger.info(f"✅ Creado nuevo asistente para {task_type} con ID: {assistant_id}")
             return assistant_id
         
         raise Exception("No se pudo crear o encontrar un asistente válido")
@@ -597,14 +696,50 @@ Por favor, adapta tus respuestas según este perfil actualizado.
         if not circuit_breaker.can_execute("openai"):
             return None, {"error": "Servicio OpenAI temporalmente no disponible"}
         
-        # Verificar si system_message o user_message contienen la palabra "json"
-        has_json_keyword = "json" in system_message.lower() or "json" in user_message.lower()
-        if not has_json_keyword:
-            logger.warning("Ni el mensaje del sistema ni el mensaje del usuario contienen la palabra 'json'")
-            # Añadir una referencia a JSON en el mensaje del usuario si es necesario
-            if task_type in ["correccion_texto", "generacion_ejercicios", "plan_estudio"]:
-                user_message += "\n\nPor favor, proporciona tu respuesta en formato json."
-                logger.info("Añadida referencia a JSON en el mensaje del usuario")
+        # Para task_type "correccion_texto", asegurarse de incluir recordatorio JSON en el mensaje
+        if task_type == "correccion_texto":
+            # Verificar si ya hay referencia a JSON en los mensajes
+            has_json_keyword = "json" in system_message.lower() or "json" in user_message.lower()
+            
+            if not has_json_keyword:
+                logger.warning("⚠️ Ni el system_message ni el user_message contienen la palabra 'json'")
+                # Añadir una referencia explícita a JSON y estructura en el mensaje del usuario
+                json_reminder = """
+                
+RECORDATORIO IMPORTANTE:
+Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura:
+{
+  "saludo": "...",
+  "tipo_texto": "...",
+  "errores": {
+    "Gramática": [...],
+    "Léxico": [...],
+    "Puntuación": [...],
+    "Estructura textual": [...]
+  },
+  "texto_corregido": "...",
+  "analisis_contextual": {
+    "coherencia": {...},
+    "cohesion": {...},
+    "registro_linguistico": {...},
+    "adecuacion_cultural": {...}
+  },
+  "consejo_final": "...",
+  "fin": "Fin de texto corregido."
+}
+                """
+                user_message += json_reminder
+                logger.info("✅ Añadido recordatorio detallado de estructura JSON al mensaje del usuario")
+        # Para otros tipos de tareas, mantener comportamiento original
+        else:
+            # Verificar si system_message o user_message contienen la palabra "json"
+            has_json_keyword = "json" in system_message.lower() or "json" in user_message.lower()
+            if not has_json_keyword:
+                logger.warning("Ni el mensaje del sistema ni el mensaje del usuario contienen la palabra 'json'")
+                # Añadir una referencia a JSON en el mensaje del usuario si es necesario
+                if task_type in ["generacion_ejercicios", "plan_estudio"]:
+                    user_message += "\n\nPor favor, proporciona tu respuesta en formato json."
+                    logger.info("Añadida referencia a JSON en el mensaje del usuario")
         
         # Iniciar métricas
         tiempo_inicio = time.time()
@@ -618,7 +753,10 @@ Por favor, adapta tus respuestas según este perfil actualizado.
         try:
             # Obtener ID del asistente apropiado
             try:
-                assistant_id = self.get_assistant_id(task_type, system_message)
+                # CAMBIO AQUÍ: Si system_message está vacío, pasamos un string vacío para no modificar 
+                # el prompt configurado en el asistente
+                assistant_instruction = system_message if system_message else ""
+                assistant_id = self.get_assistant_id(task_type, assistant_instruction)
             except Exception as e:
                 logger.error(f"Error al obtener ID de asistente: {e}")
                 return None, {"error": f"Error al obtener ID de asistente: {str(e)}"}
