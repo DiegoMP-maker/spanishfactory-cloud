@@ -5,6 +5,7 @@ Cliente limpio para OpenAI Assistants API
 -----------------------------------------
 Una implementación minimalista y robusta que usa directamente las APIs REST 
 para evitar problemas con la biblioteca oficial de Python.
+Incluye soporte para perfiles de estudiante y contexto personalizado.
 """
 
 import json
@@ -83,16 +84,60 @@ def guardar_metricas_modelo(modelo, tiempo_respuesta, longitud_texto, resultado_
         save_model_metrics(
             modelo=modelo,
             tiempo_respuesta=tiempo_respuesta,
-            longitud_texto=longitud_texto,
+            longitud_texto=longitud_estimada=longitud_texto,
             resultado_exitoso=resultado_exitoso
         )
     except Exception as e:
         logger.error(f"Error guardando métricas del modelo: {str(e)}")
 
+def get_student_profile(user_id):
+    """
+    Obtiene el perfil completo del estudiante desde Firebase.
+    
+    Args:
+        user_id (str): ID del usuario
+        
+    Returns:
+        dict: Perfil del estudiante o diccionario vacío si no está disponible
+    """
+    if not user_id:
+        return {}
+    
+    try:
+        # Intentar importar dinámicamente para evitar dependencias circulares
+        from core.firebase_client import get_user_data
+        
+        # Obtener datos del usuario
+        user_data = get_user_data(user_id)
+        
+        # Extraer información relevante para el perfil
+        profile = {
+            "nivel_mcer": user_data.get("nivel", "B1"),
+            "idioma_nativo": user_data.get("idioma_nativo", ""),
+            "objetivos_aprendizaje": user_data.get("objetivos_aprendizaje", []),
+            "areas_interes": user_data.get("areas_interes", []),
+            "numero_correcciones": user_data.get("numero_correcciones", 0)
+        }
+        
+        # Añadir estadísticas de errores si están disponibles
+        if "errores_por_tipo" in user_data:
+            profile["estadisticas_errores"] = user_data["errores_por_tipo"]
+            
+        # Añadir preferencias de feedback si están disponibles
+        if "preferencias_feedback" in user_data:
+            profile["preferencias_feedback"] = user_data["preferencias_feedback"]
+            
+        return profile
+    
+    except Exception as e:
+        logger.error(f"Error obteniendo perfil del estudiante: {str(e)}")
+        return {}
+
 class CleanOpenAIAssistants:
     """
     Clase para interactuar con la API de Asistentes de OpenAI sin usar 
     la biblioteca oficial de Python, para evitar problemas de configuración.
+    Incluye soporte para perfiles de estudiante y contexto personalizado.
     """
     
     BASE_URL = "https://api.openai.com/v1"
@@ -270,14 +315,69 @@ class CleanOpenAIAssistants:
             
         return self._api_request("POST", "/assistants", data=data)
     
-    def create_thread(self):
+    def create_thread(self, initial_message=None, user_id=None, metadata=None):
         """
-        Crea un nuevo thread.
+        Crea un nuevo thread con opciones mejoradas para incluir perfil de usuario.
         
+        Args:
+            initial_message (str, opcional): Mensaje inicial para el thread
+            user_id (str, opcional): ID del usuario para incluir información de perfil
+            metadata (dict, opcional): Metadatos adicionales para el thread
+            
         Returns:
             dict: Datos del thread creado o None si hay error
         """
-        return self._api_request("POST", "/threads", data={})
+        # Crear datos básicos del thread
+        thread_data = {}
+        
+        # Añadir metadatos si existen
+        if metadata and isinstance(metadata, dict):
+            thread_data["metadata"] = metadata
+        
+        # Crear el thread
+        thread_response = self._api_request("POST", "/threads", data=thread_data)
+        
+        # Si no hay thread_id, salir
+        if not thread_response or "id" not in thread_response:
+            logger.error("No se pudo crear el thread")
+            return None
+        
+        thread_id = thread_response["id"]
+        
+        # Añadir mensaje inicial con información de perfil si tenemos user_id
+        if user_id:
+            try:
+                # Obtener perfil del estudiante
+                profile_data = get_student_profile(user_id)
+                
+                if profile_data:
+                    # Crear mensaje con la información del perfil
+                    profile_message = f"""
+PERFIL DEL ESTUDIANTE:
+```json
+{json.dumps(profile_data, indent=2, ensure_ascii=False)}
+```
+
+Por favor, adapta tus respuestas según este perfil. Ten en cuenta especialmente:
+- Nivel MCER: {profile_data.get('nivel_mcer', 'B1')}
+- Idioma nativo: {profile_data.get('idioma_nativo', 'No especificado')}
+- Objetivos de aprendizaje: {', '.join(profile_data.get('objetivos_aprendizaje', ['No especificados']))}
+- Áreas de mejora: {str(profile_data.get('estadisticas_errores', {}))}
+
+Ten en cuenta estos datos para personalizar el feedback y la dificultad del contenido.
+"""
+                    # Añadir mensaje de perfil al thread
+                    self.add_message_to_thread(thread_id, profile_message)
+                    logger.info(f"Perfil de estudiante añadido al nuevo thread {thread_id}")
+            except Exception as profile_error:
+                logger.warning(f"No se pudo añadir perfil al thread: {str(profile_error)}")
+        
+        # Añadir mensaje inicial personalizado si existe
+        if initial_message:
+            self.add_message_to_thread(thread_id, initial_message)
+            logger.info(f"Mensaje inicial añadido al thread {thread_id}")
+        
+        return thread_response
     
     def get_thread(self, thread_id):
         """
@@ -308,6 +408,57 @@ class CleanOpenAIAssistants:
             "content": message
         }
         return self._api_request("POST", f"/threads/{thread_id}/messages", data=data)
+    
+    def update_thread_with_profile(self, thread_id, user_id):
+        """
+        Actualiza un thread existente con la información de perfil del estudiante.
+        
+        Args:
+            thread_id: ID del thread
+            user_id: ID del usuario
+            
+        Returns:
+            bool: True si se actualizó correctamente, False en caso contrario
+        """
+        try:
+            if not thread_id or not user_id:
+                logger.warning("thread_id o user_id vacío en update_thread_with_profile")
+                return False
+            
+            # Verificar que el thread existe
+            if not self.verify_thread(thread_id):
+                logger.warning(f"Thread inválido: {thread_id}")
+                return False
+            
+            # Obtener perfil del estudiante
+            profile_data = get_student_profile(user_id)
+            
+            if not profile_data:
+                logger.warning(f"No se pudo obtener perfil para usuario {user_id}")
+                return False
+            
+            # Crear mensaje con la información de perfil actualizada
+            profile_message = f"""
+ACTUALIZACIÓN DE PERFIL DEL ESTUDIANTE:
+```json
+{json.dumps(profile_data, indent=2, ensure_ascii=False)}
+```
+
+Por favor, adapta tus respuestas según este perfil actualizado.
+"""
+            # Añadir mensaje al thread
+            message_response = self.add_message_to_thread(thread_id, profile_message)
+            
+            if message_response and "id" in message_response:
+                logger.info(f"Perfil actualizado en thread {thread_id}")
+                return True
+            else:
+                logger.error(f"Error al añadir mensaje de perfil al thread {thread_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error en update_thread_with_profile: {str(e)}")
+            return False
     
     def run_assistant(self, thread_id, assistant_id):
         """
@@ -424,7 +575,7 @@ class CleanOpenAIAssistants:
     
     def get_completion(self, system_message, user_message, 
                      max_retries=MAX_RETRIES, task_type="default", 
-                     thread_id=None):
+                     thread_id=None, user_id=None):
         """
         Obtiene una respuesta usando OpenAI Assistants con soporte para thread persistente.
         
@@ -434,6 +585,7 @@ class CleanOpenAIAssistants:
             max_retries: Número máximo de reintentos
             task_type: Tipo de tarea para seleccionar el asistente adecuado
             thread_id: ID de un thread existente para continuar la conversación
+            user_id: ID del usuario para incluir información de perfil (opcional)
         
         Returns:
             tuple: (respuesta_raw, resultado_json)
@@ -451,7 +603,7 @@ class CleanOpenAIAssistants:
             logger.warning("Ni el mensaje del sistema ni el mensaje del usuario contienen la palabra 'json'")
             # Añadir una referencia a JSON en el mensaje del usuario si es necesario
             if task_type in ["correccion_texto", "generacion_ejercicios", "plan_estudio"]:
-                user_message += "\n\nPor favor, proporciona tu respuesta en formato JSON."
+                user_message += "\n\nPor favor, proporciona tu respuesta en formato json."
                 logger.info("Añadida referencia a JSON en el mensaje del usuario")
         
         # Iniciar métricas
@@ -473,13 +625,27 @@ class CleanOpenAIAssistants:
             
             # Crear o usar thread existente
             if not thread_id_is_valid:
-                thread_response = self.create_thread()
+                # Crear nuevo thread con perfil de usuario si está disponible
+                thread_response = self.create_thread(user_id=user_id)
                 if not thread_response or "id" not in thread_response:
                     return None, {"error": "No se pudo crear thread"}
                 thread_id = thread_response["id"]
                 logger.info(f"Creado nuevo thread: {thread_id}")
             else:
                 logger.info(f"Usando thread existente: {thread_id}")
+                
+                # Si tenemos user_id y thread existente, verificar si necesitamos actualizar el perfil
+                # Esta lógica podría optimizarse con un control de "última actualización de perfil"
+                if user_id:
+                    # Cada 10 interacciones o según necesidad, actualizar el perfil
+                    thread_messages = self.list_messages(thread_id)
+                    if thread_messages and "data" in thread_messages:
+                        message_count = len(thread_messages["data"])
+                        if message_count % 10 == 0:  # Actualizar cada 10 mensajes
+                            try:
+                                self.update_thread_with_profile(thread_id, user_id)
+                            except Exception as profile_error:
+                                logger.warning(f"Error actualizando perfil en thread: {str(profile_error)}")
             
             # Añadir mensaje al thread
             message_response = self.add_message_to_thread(thread_id, user_message)
