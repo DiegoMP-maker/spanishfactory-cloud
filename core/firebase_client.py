@@ -33,7 +33,7 @@ def initialize_firebase():
     """
     Inicializa la conexión con Firebase.
     
-    Configura el cliente de Firestore utilizando las credenciales almacenadas en el archivo JSON.
+    Configura el cliente de Firestore utilizando las credenciales almacenadas en st.secrets.
     
     Returns:
         tuple: (db_client, success) - Cliente de Firestore y booleano indicando éxito
@@ -50,13 +50,32 @@ def initialize_firebase():
             logger.warning("Circuit breaker abierto para Firebase")
             return None, False
         
-        # Ruta al archivo de credenciales en la raíz del proyecto
-        cred_path = "firebase-credentials.json"
-        
-        # Inicializar Firebase con el archivo de credenciales
+        # Obtener credenciales desde st.secrets
         try:
-            logger.info(f"Inicializando Firebase con archivo de credenciales: {cred_path}")
-            cred = credentials.Certificate(cred_path)
+            logger.info("Inicializando Firebase con credenciales desde st.secrets")
+            
+            # Leer las credenciales desde st.secrets como string JSON
+            firebase_credentials_json = st.secrets.get("FIREBASE_CREDENTIALS_JSON")
+            
+            if not firebase_credentials_json:
+                logger.error("No se encontraron credenciales de Firebase en st.secrets['FIREBASE_CREDENTIALS_JSON']")
+                raise ValueError("Credenciales de Firebase no encontradas en st.secrets")
+                
+            # Convertir el string JSON a diccionario
+            firebase_credentials = json.loads(firebase_credentials_json)
+            
+            # Verificar que tenemos las credenciales necesarias
+            if not firebase_credentials or not all([
+                firebase_credentials.get("type"),
+                firebase_credentials.get("project_id"),
+                firebase_credentials.get("private_key"),
+                firebase_credentials.get("client_email")
+            ]):
+                logger.error("Credenciales de Firebase incompletas en st.secrets")
+                raise ValueError("Credenciales de Firebase incompletas")
+            
+            # Inicializar con las credenciales obtenidas
+            cred = credentials.Certificate(firebase_credentials)
             app = firebase_admin.initialize_app(cred)
             db = firestore.client()
             
@@ -71,8 +90,9 @@ def initialize_firebase():
             
             logger.info("Firebase inicializado correctamente")
             return db, True
+            
         except Exception as e:
-            logger.error(f"Error inicializando Firebase con archivo de credenciales: {e}")
+            logger.error(f"Error inicializando Firebase con credenciales desde st.secrets: {e}")
             
             # Si estamos en modo desarrollo, usar configuración predeterminada
             if IS_DEV:
@@ -105,12 +125,24 @@ def initialize_firebase():
                     logger.error(f"Error inicializando Firebase con configuración predeterminada: {dev_error}")
                     circuit_breaker.record_failure("firebase", "initialization")
                     st.session_state.firebase_status = False
+                    st.error("No se pudo inicializar Firebase. Revisa las credenciales.")
                     return None, False
             else:
                 # En producción, registrar fallo
                 circuit_breaker.record_failure("firebase", "initialization")
                 st.session_state.firebase_status = False
+                st.error("No se pudo inicializar Firebase. Revisa las credenciales.")
                 return None, False
+    
+    except Exception as e:
+        logger.error(f"Error general inicializando Firebase: {e}")
+        circuit_breaker.record_failure("firebase", "initialization")
+        
+        # Actualizar estado de servicio en session state
+        st.session_state.firebase_status = False
+        st.error("No se pudo inicializar Firebase. Revisa las credenciales.")
+        
+        return None, False
     
     except Exception as e:
         logger.error(f"Error general inicializando Firebase: {e}")
