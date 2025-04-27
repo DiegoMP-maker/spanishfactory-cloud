@@ -60,105 +60,44 @@ def initialize_firebase():
             if not firebase_credentials_json:
                 logger.error("No se encontraron credenciales de Firebase en st.secrets['FIREBASE_CREDENTIALS_JSON']")
                 raise ValueError("Credenciales de Firebase no encontradas en st.secrets")
-                
-            # Convertir el string JSON a diccionario con manejo robusto de control characters
+            
+            # Convertir el string JSON a diccionario
             try:
-                # Intento 1: Parseo directo
                 firebase_credentials = json.loads(firebase_credentials_json)
             except json.JSONDecodeError as e:
-                logger.warning(f"Error en parseo directo de JSON: {str(e)}. Intentando limpiar caracteres de control...")
-                
-                # Intento 2: Limpiar caracteres de control problemáticos
-                import re
-                # Escapa caracteres problematicos en la cadena JSON
-                cleaned_json = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', firebase_credentials_json)
-                
-                # Reemplazar literales \n por saltos de línea reales donde sea necesario (especialmente en private_key)
-                cleaned_json = cleaned_json.replace("\\n", "\n")
-                
-                try:
-                    firebase_credentials = json.loads(cleaned_json)
-                except json.JSONDecodeError as e2:
-                    logger.error(f"Error persistente en el parseo del JSON: {str(e2)}")
-                    
-                    # Intento 3: Como último recurso, intentar procesar como texto
-                    if "\"private_key\":" in cleaned_json:
-                        logger.warning("Intentando extraer manualmente los campos clave del JSON...")
-                        # Extraer por patrones
-                        import re
-                        
-                        # Crea un diccionario vacío para ir agregando los valores encontrados
-                        firebase_credentials = {}
-                        
-                        # Intenta extraer project_id
-                        project_id_match = re.search(r'"project_id"\s*:\s*"([^"]*)"', cleaned_json)
-                        if project_id_match:
-                            firebase_credentials["project_id"] = project_id_match.group(1)
-                            
-                        # Intenta extraer private_key con soporte para contenido multilínea
-                        private_key_match = re.search(r'"private_key"\s*:\s*"(.*?)(?:"|$)', cleaned_json, re.DOTALL)
-                        if private_key_match:
-                            # Extraer la clave y reemplazar \\n por \n reales
-                            private_key = private_key_match.group(1).replace("\\n", "\n")
-                            firebase_credentials["private_key"] = private_key
-                            
-                        # Intenta extraer client_email
-                        client_email_match = re.search(r'"client_email"\s*:\s*"([^"]*)"', cleaned_json)
-                        if client_email_match:
-                            firebase_credentials["client_email"] = client_email_match.group(1)
-                            
-                        # Intenta extraer type
-                        type_match = re.search(r'"type"\s*:\s*"([^"]*)"', cleaned_json)
-                        if type_match:
-                            firebase_credentials["type"] = type_match.group(1)
-                            
-                        # Verifica si se han encontrado los campos mínimos necesarios
-                        if not all(k in firebase_credentials for k in ["project_id", "private_key", "client_email", "type"]):
-                            raise ValueError("No se pudieron extraer todos los campos necesarios de las credenciales")
-                    else:
-                        raise ValueError("El formato JSON de credenciales es incompatible y no se puede procesar")
+                logger.error(f"Error al parsear JSON de credenciales: {e}")
+                raise ValueError(f"JSON de credenciales inválido: {e}")
             
-            # Verificar que tenemos las credenciales necesarias
-            if not firebase_credentials or not all([
-                firebase_credentials.get("type"),
-                firebase_credentials.get("project_id"),
-                firebase_credentials.get("private_key"),
-                firebase_credentials.get("client_email")
-            ]):
-                logger.error("Credenciales de Firebase incompletas en st.secrets")
-                raise ValueError("Credenciales de Firebase incompletas")
+            # SOLUCIÓN CLAVE: Asegurar que la private_key tenga \n reales, no literales
+            if "private_key" in firebase_credentials:
+                # Reemplazar los \n literales por saltos de línea reales
+                firebase_credentials["private_key"] = firebase_credentials["private_key"].replace("\\n", "\n")
             
-            # Log de verificación (solo muestra información parcial por seguridad)
-            project_id = firebase_credentials.get("project_id", "")
-            logger.info(f"Credenciales procesadas correctamente para proyecto: {project_id}")
+            # Verificar campos requeridos
+            required_fields = ["type", "project_id", "private_key", "client_email"]
+            for field in required_fields:
+                if field not in firebase_credentials:
+                    logger.error(f"Falta campo requerido en credenciales: {field}")
+                    raise ValueError(f"Credenciales de Firebase incompletas: falta {field}")
             
-            # Inicializar con las credenciales obtenidas
-            try:
+            # Inicializar Firebase
+            if not firebase_admin._apps:
                 cred = credentials.Certificate(firebase_credentials)
-                
-                # Verificar si ya hay una app inicializada
-                if not firebase_admin._apps:
-                    app = firebase_admin.initialize_app(cred)
-                else:
-                    # Si ya hay una app, usarla
-                    logger.info("App de Firebase ya inicializada, usando la existente")
-                    
-                db = firestore.client()
-                
-                # Marcar como inicializado
-                firebase_initialized = True
-                
-                # Actualizar estado de servicio en session state
-                st.session_state.firebase_status = True
-                
-                # Registrar éxito
-                circuit_breaker.record_success("firebase")
-                
-                logger.info("Firebase inicializado correctamente")
-                return db, True
-            except Exception as init_error:
-                logger.error(f"Error inicializando Firebase con credenciales procesadas: {init_error}")
-                raise
+                app = firebase_admin.initialize_app(cred)
+            
+            db = firestore.client()
+            
+            # Marcar como inicializado
+            firebase_initialized = True
+            
+            # Actualizar estado de servicio en session state
+            st.session_state.firebase_status = True
+            
+            # Registrar éxito
+            circuit_breaker.record_success("firebase")
+            
+            logger.info("Firebase inicializado correctamente")
+            return db, True
             
         except Exception as e:
             logger.error(f"Error inicializando Firebase con credenciales desde st.secrets: {e}")
@@ -170,22 +109,21 @@ def initialize_firebase():
                     firebase_credentials = DEFAULT_FIREBASE_CONFIG
                     
                     # Verificar que tenemos las credenciales necesarias
-                    if not firebase_credentials or not all([
-                        firebase_credentials.get("type"),
-                        firebase_credentials.get("project_id"),
-                        firebase_credentials.get("private_key"),
-                        firebase_credentials.get("client_email")
-                    ]):
-                        logger.error("Credenciales de Firebase predeterminadas incompletas")
-                        raise ValueError("Credenciales de Firebase predeterminadas incompletas")
+                    required_fields = ["type", "project_id", "private_key", "client_email"]
+                    for field in required_fields:
+                        if field not in firebase_credentials:
+                            logger.error(f"Falta campo requerido en credenciales predeterminadas: {field}")
+                            raise ValueError(f"Credenciales predeterminadas incompletas: falta {field}")
+                    
+                    # También asegurar que private_key tenga \n reales en las credenciales predeterminadas
+                    if "private_key" in firebase_credentials:
+                        firebase_credentials["private_key"] = firebase_credentials["private_key"].replace("\\n", "\n")
                     
                     # Inicializar con credenciales predeterminadas
                     if not firebase_admin._apps:
                         cred = credentials.Certificate(firebase_credentials)
                         app = firebase_admin.initialize_app(cred)
-                    else:
-                        logger.info("App de Firebase ya inicializada, usando la existente")
-                        
+                    
                     db = firestore.client()
                     
                     # Marcar como inicializado
@@ -216,7 +154,7 @@ def initialize_firebase():
         st.error("No se pudo inicializar Firebase. Revisa las credenciales.")
         
         return None, False
-
+        
 # --- AÑADIR ESTA FUNCIÓN AUXILIAR ---
 def debug_firebase_auth_request(api_key, payload, headers=None):
     """
