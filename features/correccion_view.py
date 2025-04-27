@@ -10,10 +10,13 @@ import logging
 import streamlit as st
 import json
 import re
+import uuid
 from datetime import datetime
 
 # Importaciones para la corrección de textos
 from features.correccion import corregir_texto, mostrar_resultado_correccion
+from features.exportacion import mostrar_opciones_exportacion
+from features.correccion_utils import display_correccion_result
 from config.settings import NIVELES_ESPANOL
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,8 @@ def render_view():
         st.session_state.mostrar_resultado = False
     if "tab_index" not in st.session_state:
         st.session_state.tab_index = 0
+    if "exportacion_mostrada" not in st.session_state:
+        st.session_state.exportacion_mostrada = False
     
     # Formulario para configurar la corrección
     with st.form(key="correction_form"):
@@ -50,7 +55,7 @@ def render_view():
         )
         
         # Opciones de configuración
-        col1, col2, col3 = st.columns([1, 1, 1])
+        col1, col2 = st.columns(2)
         
         with col1:
             # Selector de nivel
@@ -69,67 +74,39 @@ def render_view():
                 value="Intermedio",
                 help="Selecciona cuánto detalle quieres en las explicaciones"
             )
-            
-        with col3:
-            # Selector de idioma para las explicaciones
-            idioma_explicaciones = st.selectbox(
-                "Idioma de las explicaciones",
-                ["español", "inglés", "francés", "alemán", "italiano", "portugués"],
-                index=0,
-                help="Selecciona el idioma en el que quieres recibir las explicaciones"
-            )
         
         # Botón para enviar
         enviar = st.form_submit_button("Analizar texto")
         
         # Procesar cuando se envía el formulario
-        if enviar:
-            # Validar que el texto no esté vacío
-            if not texto_usuario or not texto_usuario.strip():
-                st.error("Por favor, introduce un texto para analizar.")
-                return
-                
+        if enviar and texto_usuario:
             with st.spinner("Analizando tu texto..."):
                 # Guardar texto original
                 st.session_state.texto_original = texto_usuario
                 
-                # Resetear la pestaña seleccionada
+                # Resetear estados de visualización
                 st.session_state.tab_index = 0
+                st.session_state.exportacion_mostrada = False
                 
                 # Obtener información del usuario para el ID
                 from core.session_manager import get_user_info
                 user_info = get_user_info()
                 user_id = user_info.get("uid") if user_info else None
                 
-                # Mostrar mensaje de espera
-                st.info("Analizando el texto. Por favor, espera unos momentos...")
-                
                 # Procesar con la función de corrección
-                try:
-                    # Pasar el texto como texto_input (nombre correcto del parámetro)
-                    resultado = corregir_texto(
-                        texto_input=texto_usuario,
-                        nivel=nivel_seleccionado,
-                        detalle=nivel_detalle,
-                        user_id=user_id,
-                        idioma=idioma_explicaciones
-                    )
-                    
-                    # Verificar el resultado
-                    if resultado is None:
-                        st.error("No se pudo obtener una corrección. El servidor puede estar ocupado. Por favor, inténtalo de nuevo en unos momentos.")
-                        logger.error("corregir_texto() devolvió None")
-                        return
-                        
-                    # Guardar resultado (incluso si tiene error, para mostrar el mensaje apropiado)
+                resultado = corregir_texto(
+                    texto_input=texto_usuario,  # Corregido: 'texto' -> 'texto_input'
+                    nivel=nivel_seleccionado,
+                    detalle=nivel_detalle,
+                    user_id=user_id
+                )
+                
+                if resultado:
+                    # Guardar resultado
                     st.session_state.correction_result = resultado
                     st.session_state.mostrar_resultado = True
-                    
-                except Exception as e:
-                    st.error(f"Ocurrió un error durante el procesamiento: {str(e)}")
-                    logger.error(f"Error procesando corrección: {str(e)}")
-                    # Asegurar que el usuario no pierda su texto
-                    st.session_state.texto_original = texto_usuario
+                else:
+                    st.error("No se pudo obtener una corrección válida. Por favor, inténtalo de nuevo.")
     
     # Mostrar resultados si están disponibles
     if st.session_state.mostrar_resultado and st.session_state.correction_result:
@@ -139,9 +116,12 @@ def render_view():
         # Definir pestañas para la navegación
         tab_names = ["Corrección", "Análisis contextual", "Consejo final", "Exportar informe"]
         
-        # Función de callback para cuando cambia la pestaña seleccionada
+        # Función para manejar el cambio de pestaña
         def on_tab_change():
             st.session_state.tab_index = tab_names.index(st.session_state.selected_tab)
+            # Resetear exportación mostrada cuando se cambia de pestaña
+            if st.session_state.selected_tab == "Exportar informe":
+                st.session_state.exportacion_mostrada = False
         
         # Mostrar pestañas con la seleccionada por session_state
         selected_tab = st.radio(
@@ -153,117 +133,48 @@ def render_view():
             horizontal=True
         )
         
-        try:
-            # Tab 1: Corrección (texto corregido y errores)
-            if selected_tab == "Corrección":
-                # Sólo mostramos la parte de corrección
-                try:
-                    from features.correccion_utils import display_correction_section
-                    display_correction_section(st.session_state.correction_result)
-                except ImportError:
-                    # Fallback por si no existe la función específica
-                    st.subheader("Texto corregido")
-                    st.write(st.session_state.correction_result.get("texto_corregido", ""))
-                    
-                    # Mostrar errores por categoría
-                    st.subheader("Errores encontrados")
-                    errores = st.session_state.correction_result.get("errores", {})
-                    if errores:
-                        for categoria, lista_errores in errores.items():
-                            if lista_errores:
-                                with st.expander(f"{categoria} ({len(lista_errores)})"):
-                                    for error in lista_errores:
-                                        st.markdown(f"❌ **Error:** {error.get('fragmento_erroneo', '')}")
-                                        st.markdown(f"✅ **Corrección:** {error.get('correccion', '')}")
-                                        st.markdown(f"💡 **Explicación:** {error.get('explicacion', '')}")
-                                        st.markdown("---")
-                    else:
-                        st.success("¡No se encontraron errores en el texto!")
+        # Crear un ID único para esta sesión
+        session_id = str(uuid.uuid4())[:8]
+        
+        # Mostrar el contenido de la pestaña seleccionada
+        if selected_tab == "Corrección":
+            # Mostrar la corrección utilizando la función existente
+            display_correccion_result(st.session_state.correction_result)
+        
+        elif selected_tab == "Análisis contextual":
+            # Mostrar el análisis contextual
+            analisis = st.session_state.correction_result.get("analisis_contextual", {})
+            if analisis:
+                for categoria, info in analisis.items():
+                    with st.expander(f"{categoria.replace('_', ' ').title()} ({info.get('puntuacion', 0)}/10)", expanded=True):
+                        st.write(info.get("comentario", ""))
+                        
+                        # Mostrar sugerencias si existen
+                        if "sugerencias" in info and info["sugerencias"]:
+                            st.subheader("Sugerencias:")
+                            for sugerencia in info["sugerencias"]:
+                                st.markdown(f"• {sugerencia}")
+            else:
+                st.info("No hay análisis contextual disponible para este texto.")
+        
+        elif selected_tab == "Consejo final":
+            # Mostrar el consejo final
+            consejo = st.session_state.correction_result.get("consejo_final", "")
+            st.success(consejo)
             
-            # Tab 2: Análisis contextual
-            elif selected_tab == "Análisis contextual":
-                try:
-                    from features.correccion_utils import display_analysis_section
-                    display_analysis_section(st.session_state.correction_result)
-                except ImportError:
-                    # Fallback
-                    st.subheader("Análisis contextual")
-                    analisis = st.session_state.correction_result.get("analisis_contextual", {})
-                    if analisis:
-                        for categoria, info in analisis.items():
-                            with st.expander(f"{categoria.replace('_', ' ').title()} ({info.get('puntuacion', 0)}/10)"):
-                                st.write(info.get("comentario", ""))
-                                
-                                # Mostrar sugerencias si existen
-                                if "sugerencias" in info and info["sugerencias"]:
-                                    st.subheader("Sugerencias:")
-                                    for sugerencia in info["sugerencias"]:
-                                        st.markdown(f"• {sugerencia}")
-                    else:
-                        st.info("No hay análisis contextual disponible para este texto.")
-            
-            # Tab 3: Consejo final
-            elif selected_tab == "Consejo final":
-                st.subheader("Consejo final")
-                consejo = st.session_state.correction_result.get("consejo_final", "")
+            # Mostrar puntuación general si existe
+            if "puntuacion" in st.session_state.correction_result:
+                puntuacion = st.session_state.correction_result.get("puntuacion", 0)
+                st.metric("Puntuación global", f"{puntuacion}/10")
+        
+        elif selected_tab == "Exportar informe":
+            # Solo mostrar opciones de exportación una vez por pestaña
+            if not st.session_state.exportacion_mostrada:
+                # Generar un ID único para cada sesión de exportación
+                export_id = f"{session_id}_{int(datetime.now().timestamp())}"
                 
-                # Mostrar en un contenedor con estilo
-                st.success(consejo)
+                # Mostrar opciones de exportación
+                mostrar_opciones_exportacion(st.session_state.correction_result, export_id)
                 
-                # Mostrar puntuación general si existe
-                if "puntuacion" in st.session_state.correction_result:
-                    puntuacion = st.session_state.correction_result.get("puntuacion", 0)
-                    st.metric("Puntuación global", f"{puntuacion}/10")
-            
-            # Tab 4: Exportar informe
-            elif selected_tab == "Exportar informe":
-                st.subheader("Exportar")
-                
-                # Cargar funciones de exportación dinámicamente
-                try:
-                    from features.exportacion import exportar_correccion_word, exportar_correccion_pdf
-                    
-                    # Crear dos columnas para los botones
-                    col1, col2 = st.columns(2)
-                    
-                    # Generar timestamp único para este render
-                    import time
-                    timestamp = int(time.time())
-                    
-                    with col1:
-                        # Botón para Word con clave única temporal
-                        if st.button("📄 Exportar a Word", key=f"export_word_btn_{timestamp}", use_container_width=True):
-                            with st.spinner("Generando documento Word..."):
-                                result = exportar_correccion_word(st.session_state.correction_result)
-                                if result:
-                                    st.success("Exportación completada. El documento se descargará automáticamente.")
-                                else:
-                                    st.error("Error al generar el documento Word.")
-                    
-                    with col2:
-                        # Botón para PDF con clave única temporal
-                        if st.button("📑 Exportar a PDF", key=f"export_pdf_btn_{timestamp}", use_container_width=True):
-                            with st.spinner("Generando documento PDF..."):
-                                result = exportar_correccion_pdf(st.session_state.correction_result)
-                                if result:
-                                    st.success("Exportación completada. El documento se descargará automáticamente.")
-                                else:
-                                    st.error("Error al generar el PDF. Asegúrate de tener wkhtmltopdf instalado.")
-                
-                except ImportError as e:
-                    st.error(f"No se pudieron cargar las funciones de exportación: {str(e)}")
-                    st.info("Contacta con el administrador del sistema para resolver este problema.")
-            
-        except Exception as e:
-            st.error(f"Error mostrando el resultado: {str(e)}")
-            logger.error(f"Error en mostrar_resultado_correccion: {str(e)}")
-            
-            # Fallback básico para mostrar algo al usuario
-            if isinstance(st.session_state.correction_result, dict):
-                if "texto_original" in st.session_state.correction_result:
-                    with st.expander("Tu texto original"):
-                        st.write(st.session_state.correction_result.get("texto_original", ""))
-                
-                if "texto_corregido" in st.session_state.correction_result:
-                    st.subheader("Texto corregido")
-                    st.write(st.session_state.correction_result.get("texto_corregido", ""))
+                # Marcar como mostrado
+                st.session_state.exportacion_mostrada = True
