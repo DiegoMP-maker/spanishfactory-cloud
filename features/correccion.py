@@ -74,6 +74,8 @@ Nivel de detalle deseado: {detalle}
 Idioma para explicaciones: {idioma}
 
 IMPORTANTE: Al evaluar, considera que los errores deben penalizarse de manera diferente según el nivel del estudiante. Un error básico en un estudiante de nivel avanzado debe tener mayor impacto en la puntuación que el mismo error en un principiante.
+
+Recuerda responder en formato json según las instrucciones.
 """
         except Exception as format_error:
             logger.error(f"Error formateando mensajes: {str(format_error)}")
