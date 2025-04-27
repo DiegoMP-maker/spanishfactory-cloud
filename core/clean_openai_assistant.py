@@ -597,8 +597,18 @@ Por favor, adapta tus respuestas según este perfil actualizado.
         if not circuit_breaker.can_execute("openai"):
             return None, {"error": "Servicio OpenAI temporalmente no disponible"}
         
-        # Verificar si system_message o user_message contienen la palabra "json"
-        has_json_keyword = "json" in system_message.lower() or "json" in user_message.lower()
+        # Solo modificar user_message con la referencia a JSON si system_message está vacío 
+        # y no hay referencia a JSON en el mensaje del usuario
+        # CAMBIO AQUÍ: No sobrescribir el system_prompt del asistente cuando system_message está vacío
+        has_json_keyword = False
+        
+        # Si system_message está presente, verificamos si contiene "json"
+        if system_message:
+            has_json_keyword = "json" in system_message.lower()
+        
+        # También verificamos si user_message contiene "json"
+        has_json_keyword = has_json_keyword or "json" in user_message.lower()
+        
         if not has_json_keyword:
             logger.warning("Ni el mensaje del sistema ni el mensaje del usuario contienen la palabra 'json'")
             # Añadir una referencia a JSON en el mensaje del usuario si es necesario
@@ -618,7 +628,10 @@ Por favor, adapta tus respuestas según este perfil actualizado.
         try:
             # Obtener ID del asistente apropiado
             try:
-                assistant_id = self.get_assistant_id(task_type, system_message)
+                # CAMBIO AQUÍ: Si system_message está vacío, pasamos un string vacío para no modificar 
+                # el prompt configurado en el asistente
+                assistant_instruction = system_message if system_message else ""
+                assistant_id = self.get_assistant_id(task_type, assistant_instruction)
             except Exception as e:
                 logger.error(f"Error al obtener ID de asistente: {e}")
                 return None, {"error": f"Error al obtener ID de asistente: {str(e)}"}
