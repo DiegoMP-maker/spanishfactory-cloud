@@ -84,7 +84,7 @@ def guardar_metricas_modelo(modelo, tiempo_respuesta, longitud_texto, resultado_
         save_model_metrics(
             modelo=modelo,
             tiempo_respuesta=tiempo_respuesta,
-            longitud_texto=longitud_estimada=longitud_texto,
+            longitud_texto=longitud_texto,  # Corregido
             resultado_exitoso=resultado_exitoso
         )
     except Exception as e:
