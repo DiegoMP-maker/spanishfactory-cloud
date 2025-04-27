@@ -135,6 +135,13 @@ def render_view():
         try:
             # Mostrar resultado de la corrección
             mostrar_resultado_correccion(st.session_state.correction_result)
+            
+            # Añadir opciones de exportación DESPUÉS de mostrar el resultado
+            st.markdown("---")
+            
+            # AGREGADO: Mostrar opciones de exportación después del resultado
+            mostrar_opciones_exportacion(st.session_state.correction_result)
+            
         except Exception as e:
             st.error(f"Error mostrando el resultado: {str(e)}")
             logger.error(f"Error en mostrar_resultado_correccion: {str(e)}")
