@@ -12,7 +12,7 @@ import re
 import traceback
 import streamlit as st
 
-from core.openai_integration import process_with_assistant
+from core.openai_integration import process_with_assistant, get_user_profile_data
 from core.circuit_breaker import circuit_breaker
 from core.session_manager import get_user_info, get_session_var
 from config.settings import NIVELES_ESPANOL
@@ -62,11 +62,45 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
             logger.warning(f"Nivel inválido: {nivel}")
             nivel = "B1"  # Valor por defecto
         
+        # Obtener información adicional del perfil del usuario si está disponible
+        perfil_usuario = {}
+        if user_id:
+            try:
+                perfil_usuario = get_user_profile_data(user_id)
+                logger.info(f"Información de perfil recuperada para usuario {user_id}")
+            except Exception as profile_error:
+                logger.warning(f"No se pudo obtener perfil del usuario: {str(profile_error)}")
+        
         # Preparar mensaje para el asistente
         try:
+            # Enriquecer el mensaje con información contextual del perfil
+            info_contextual = ""
+            if perfil_usuario:
+                # Añadir solo info relevante directamente en el mensaje
+                info_contextual = f"""
+CONTEXTO DEL ESTUDIANTE:
+- Nivel MCER: {nivel}
+- Idioma nativo: {perfil_usuario.get('idioma_nativo', 'No especificado')}
+- Correcciones previas: {perfil_usuario.get('numero_correcciones', 0)}
+"""
+                # Añadir info de errores frecuentes si está disponible
+                if "estadisticas_errores" in perfil_usuario:
+                    errores = perfil_usuario["estadisticas_errores"]
+                    info_contextual += "- Áreas de mejora: "
+                    areas_mejora = []
+                    for tipo, cantidad in errores.items():
+                        if cantidad > 0:
+                            areas_mejora.append(f"{tipo} ({cantidad})")
+                    if areas_mejora:
+                        info_contextual += ", ".join(areas_mejora)
+                    else:
+                        info_contextual += "No hay datos previos"
+            
             # El asistente ya tiene instrucciones configuradas, añadimos instrucciones específicas
             # para la evaluación adaptada al nivel
             user_message = f"""
+{info_contextual}
+
 Texto para revisar (nivel declarado del estudiante: {nivel}):
 "{texto_input}"
 
