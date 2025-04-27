@@ -1,12 +1,13 @@
 import logging
 import time
 import os
-import json
+from typing import Dict, Any, Tuple, List, Optional, Union
 
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore, auth, storage
 import requests
+import json
 
 # Importar configuración
 from config.settings import FIREBASE_COLLECTION_USERS, FIREBASE_COLLECTION_CORRECTIONS
@@ -28,50 +29,14 @@ class FirebaseWebAPIKeyMissingError(Exception):
 firebase_initialized = False
 db = None
 
-def validate_firebase_credentials(credentials_dict):
-    """
-    Valida si un diccionario de credenciales contiene los campos necesarios para inicializar Firebase.
-    
-    Args:
-        credentials_dict (dict): Diccionario con las credenciales de Firebase
-        
-    Returns:
-        bool: True si las credenciales son válidas, False en caso contrario
-        
-    Raises:
-        ValueError: Si las credenciales están incompletas o son inválidas
-    """
-    if not credentials_dict:
-        raise ValueError("Credenciales de Firebase no proporcionadas")
-        
-    # Verificar campos requeridos
-    required_fields = ["type", "project_id", "private_key", "client_email"]
-    for field in required_fields:
-        if field not in credentials_dict:
-            raise ValueError(f"Credenciales de Firebase incompletas: falta el campo '{field}'")
-            
-    return True
-
 def initialize_firebase():
     """
     Inicializa la conexión con Firebase.
     
-    Configura el cliente de Firestore utilizando credenciales desde st.secrets["FIREBASE_CREDENTIALS_JSON"].
-    Esta función se encarga de:
-    1. Verificar si Firebase ya está inicializado para evitar doble inicialización
-    2. Obtener y validar las credenciales desde st.secrets
-    3. Inicializar Firebase con las credenciales proporcionadas
-    4. Registrar cualquier error y actualizar el estado de la aplicación
+    Configura el cliente de Firestore utilizando las credenciales almacenadas en el archivo JSON.
     
     Returns:
-        tuple: (db_client, success) donde:
-            - db_client: Instancia del cliente Firestore o None si hubo error
-            - success: Boolean indicando si la inicialización fue exitosa
-            
-    Notas:
-        - Si Firebase ya está inicializado, devuelve la instancia existente
-        - En modo desarrollo (IS_DEV), intenta usar DEFAULT_FIREBASE_CONFIG como fallback
-        - Actualiza st.session_state.firebase_status con el estado actual
+        tuple: (db_client, success) - Cliente de Firestore y booleano indicando éxito
     """
     try:
         # Verificar si Firebase ya está inicializado
@@ -85,28 +50,14 @@ def initialize_firebase():
             logger.warning("Circuit breaker abierto para Firebase")
             return None, False
         
-        # Obtener credenciales desde st.secrets
+        # Ruta al archivo de credenciales en la raíz del proyecto
+        cred_path = "firebase-credentials.json"
+        
+        # Inicializar Firebase con el archivo de credenciales
         try:
-            logger.info("Inicializando Firebase con credenciales desde st.secrets")
-            
-            # Leer las credenciales desde st.secrets como string JSON
-            firebase_credentials_json = st.secrets.get("FIREBASE_CREDENTIALS_JSON")
-            
-            if not firebase_credentials_json:
-                logger.error("No se encontraron credenciales de Firebase en st.secrets['FIREBASE_CREDENTIALS_JSON']")
-                raise ValueError("Credenciales de Firebase no encontradas en st.secrets")
-                
-            # Convertir el string JSON a diccionario
-            firebase_credentials = json.loads(firebase_credentials_json)
-            
-            # Validar credenciales
-            validate_firebase_credentials(firebase_credentials)
-            
-            # Inicializar con las credenciales obtenidas (verificando si ya hay una app)
-            if not firebase_admin._apps:
-                cred = credentials.Certificate(firebase_credentials)
-                firebase_admin.initialize_app(cred)
-            
+            logger.info(f"Inicializando Firebase con archivo de credenciales: {cred_path}")
+            cred = credentials.Certificate(cred_path)
+            app = firebase_admin.initialize_app(cred)
             db = firestore.client()
             
             # Marcar como inicializado
@@ -120,9 +71,8 @@ def initialize_firebase():
             
             logger.info("Firebase inicializado correctamente")
             return db, True
-            
         except Exception as e:
-            logger.error(f"Error inicializando Firebase con credenciales desde st.secrets: {e}")
+            logger.error(f"Error inicializando Firebase con archivo de credenciales: {e}")
             
             # Si estamos en modo desarrollo, usar configuración predeterminada
             if IS_DEV:
@@ -130,14 +80,19 @@ def initialize_firebase():
                     logger.warning("Modo desarrollo: usando configuración predeterminada")
                     firebase_credentials = DEFAULT_FIREBASE_CONFIG
                     
-                    # Validar credenciales predeterminadas
-                    validate_firebase_credentials(firebase_credentials)
+                    # Verificar que tenemos las credenciales necesarias
+                    if not firebase_credentials or not all([
+                        firebase_credentials.get("type"),
+                        firebase_credentials.get("project_id"),
+                        firebase_credentials.get("private_key"),
+                        firebase_credentials.get("client_email")
+                    ]):
+                        logger.error("Credenciales de Firebase predeterminadas incompletas")
+                        raise ValueError("Credenciales de Firebase predeterminadas incompletas")
                     
-                    # Inicializar con credenciales predeterminadas (verificando si ya hay una app)
-                    if not firebase_admin._apps:
-                        cred = credentials.Certificate(firebase_credentials)
-                        firebase_admin.initialize_app(cred)
-                    
+                    # Inicializar con credenciales predeterminadas
+                    cred = credentials.Certificate(firebase_credentials)
+                    app = firebase_admin.initialize_app(cred)
                     db = firestore.client()
                     
                     # Marcar como inicializado
@@ -150,13 +105,11 @@ def initialize_firebase():
                     logger.error(f"Error inicializando Firebase con configuración predeterminada: {dev_error}")
                     circuit_breaker.record_failure("firebase", "initialization")
                     st.session_state.firebase_status = False
-                    st.error("No se pudo inicializar Firebase. Revisa las credenciales.")
                     return None, False
             else:
                 # En producción, registrar fallo
                 circuit_breaker.record_failure("firebase", "initialization")
                 st.session_state.firebase_status = False
-                st.error("No se pudo inicializar Firebase. Revisa las credenciales.")
                 return None, False
     
     except Exception as e:
@@ -165,9 +118,9 @@ def initialize_firebase():
         
         # Actualizar estado de servicio en session state
         st.session_state.firebase_status = False
-        st.error("No se pudo inicializar Firebase. Revisa las credenciales.")
         
         return None, False
+
 # --- AÑADIR ESTA FUNCIÓN AUXILIAR ---
 def debug_firebase_auth_request(api_key, payload, headers=None):
     """
