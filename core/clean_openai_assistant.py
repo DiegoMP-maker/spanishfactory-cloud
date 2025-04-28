@@ -25,6 +25,12 @@ from core.circuit_breaker import circuit_breaker
 # Configurar logger
 logger = logging.getLogger(__name__)
 
+# Configuración global para timeouts
+DEFAULT_API_TIMEOUT = 30       # Timeout para peticiones API básicas
+MESSAGES_API_TIMEOUT = 60      # Timeout para obtener mensajes
+RUN_API_TIMEOUT = 60           # Timeout para ejecutar asistentes
+POLLING_API_TIMEOUT = 30       # Timeout para polling de estado
+
 def extract_json_safely(content):
     """
     Extrae JSON válido de una cadena de texto con manejo de errores mejorado y reparación.
@@ -347,7 +353,7 @@ class CleanOpenAIAssistants:
         except Exception as e:
             logger.warning(f"Error al cargar IDs de asistentes desde secrets: {e}")
     
-    def _api_request(self, method, endpoint, data=None, params=None, timeout=10):
+    def _api_request(self, method, endpoint, data=None, params=None, timeout=DEFAULT_API_TIMEOUT):
         """
         Realiza una petición a la API de OpenAI.
         
@@ -382,6 +388,9 @@ class CleanOpenAIAssistants:
                 return response.json()
             return {"success": True}
             
+        except requests.exceptions.ReadTimeout as e:
+            logger.error(f"Timeout en petición a {url}: {e} (timeout={timeout}s)")
+            return {"error": f"Timeout después de {timeout}s", "error_type": "timeout"}
         except requests.exceptions.RequestException as e:
             logger.error(f"Error en petición a {url}: {e}")
             if hasattr(e, 'response') and e.response is not None:
@@ -390,7 +399,7 @@ class CleanOpenAIAssistants:
                     logger.error(f"Detalles del error: {error_detail}")
                 except:
                     logger.error(f"Status: {e.response.status_code}, Contenido: {e.response.content}")
-            return None
+            return {"error": str(e), "error_type": "request"}
     
     def list_assistants(self, limit=20):
         """
@@ -439,7 +448,7 @@ class CleanOpenAIAssistants:
         if json_mode:
             data["response_format"] = {"type": "json_object"}
             
-        return self._api_request("POST", "/assistants", data=data)
+        return self._api_request("POST", "/assistants", data=data, timeout=RUN_API_TIMEOUT)
     
     def create_thread(self, initial_message=None, user_id=None, metadata=None):
         """
@@ -461,7 +470,7 @@ class CleanOpenAIAssistants:
             thread_data["metadata"] = metadata
         
         # Crear el thread
-        thread_response = self._api_request("POST", "/threads", data=thread_data)
+        thread_response = self._api_request("POST", "/threads", data=thread_data, timeout=RUN_API_TIMEOUT)
         
         # Si no hay thread_id, salir
         if not thread_response or "id" not in thread_response:
@@ -533,7 +542,7 @@ Ten en cuenta estos datos para personalizar el feedback y la dificultad del cont
             "role": role,
             "content": message
         }
-        return self._api_request("POST", f"/threads/{thread_id}/messages", data=data)
+        return self._api_request("POST", f"/threads/{thread_id}/messages", data=data, timeout=RUN_API_TIMEOUT)
     
     def update_thread_with_profile(self, thread_id, user_id):
         """
@@ -579,7 +588,13 @@ Por favor, adapta tus respuestas según este perfil actualizado.
                 logger.info(f"Perfil actualizado en thread {thread_id}")
                 return True
             else:
-                logger.error(f"Error al añadir mensaje de perfil al thread {thread_id}")
+                error_msg = message_response.get("error", "Error desconocido") if isinstance(message_response, dict) else "Error desconocido"
+                error_type = message_response.get("error_type", "general") if isinstance(message_response, dict) else "general" 
+                
+                if error_type == "timeout":
+                    logger.error(f"Timeout al añadir mensaje de perfil al thread {thread_id}: {error_msg}")
+                else:
+                    logger.error(f"Error al añadir mensaje de perfil al thread {thread_id}: {error_msg}")
                 return False
                 
         except Exception as e:
@@ -598,7 +613,7 @@ Por favor, adapta tus respuestas según este perfil actualizado.
             dict: Datos de la ejecución creada o None si hay error
         """
         data = {"assistant_id": assistant_id}
-        return self._api_request("POST", f"/threads/{thread_id}/runs", data=data)
+        return self._api_request("POST", f"/threads/{thread_id}/runs", data=data, timeout=RUN_API_TIMEOUT)
     
     def get_run(self, thread_id, run_id):
         """
@@ -611,7 +626,7 @@ Por favor, adapta tus respuestas según este perfil actualizado.
         Returns:
             dict: Estado de la ejecución o None si hay error
         """
-        return self._api_request("GET", f"/threads/{thread_id}/runs/{run_id}")
+        return self._api_request("GET", f"/threads/{thread_id}/runs/{run_id}", timeout=POLLING_API_TIMEOUT)
     
     def list_messages(self, thread_id, limit=20):
         """
@@ -625,7 +640,7 @@ Por favor, adapta tus respuestas según este perfil actualizado.
             list: Lista de mensajes o None si hay error
         """
         params = {"limit": limit}
-        return self._api_request("GET", f"/threads/{thread_id}/messages", params=params)
+        return self._api_request("GET", f"/threads/{thread_id}/messages", params=params, timeout=MESSAGES_API_TIMEOUT)
     
     def verify_thread(self, thread_id):
         """
@@ -824,14 +839,32 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                 assistant_id = self.get_assistant_id(task_type, assistant_instruction)
             except Exception as e:
                 logger.error(f"Error al obtener ID de asistente: {e}")
-                return None, {"error": f"Error al obtener ID de asistente: {str(e)}"}
+                return None, {
+                    "error": f"Error al obtener ID de asistente: {str(e)}",
+                    "texto_corregido": "Error interno al configurar el servicio de corrección.",
+                    "errores": {
+                        "Gramática": [],
+                        "Léxico": [],
+                        "Puntuación": [],
+                        "Estructura textual": []
+                    }
+                }
             
             # Crear o usar thread existente
             if not thread_id_is_valid:
                 # Crear nuevo thread con perfil de usuario si está disponible
                 thread_response = self.create_thread(user_id=user_id)
                 if not thread_response or "id" not in thread_response:
-                    return None, {"error": "No se pudo crear thread"}
+                    return None, {
+                        "error": "No se pudo crear thread",
+                        "texto_corregido": "No se pudo iniciar la sesión de corrección.",
+                        "errores": {
+                            "Gramática": [],
+                            "Léxico": [],
+                            "Puntuación": [],
+                            "Estructura textual": []
+                        }
+                    }
                 thread_id = thread_response["id"]
                 logger.info(f"Creado nuevo thread: {thread_id}")
             else:
@@ -842,6 +875,21 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                 if user_id:
                     # Cada 10 interacciones o según necesidad, actualizar el perfil
                     thread_messages = self.list_messages(thread_id)
+                    
+                    # Verificar si la respuesta contiene error de timeout
+                    if isinstance(thread_messages, dict) and "error_type" in thread_messages and thread_messages["error_type"] == "timeout":
+                        logger.warning(f"Timeout al obtener mensajes del thread: {thread_messages.get('error', 'Timeout')}")
+                        return None, {
+                            "error": "Timeout al obtener mensajes del thread",
+                            "texto_corregido": "El servicio de corrección está tardando demasiado en responder. Por favor, inténtelo de nuevo más tarde.",
+                            "errores": {
+                                "Gramática": [],
+                                "Léxico": [],
+                                "Puntuación": [],
+                                "Estructura textual": []
+                            }
+                        }
+                    
                     if thread_messages and "data" in thread_messages:
                         message_count = len(thread_messages["data"])
                         if message_count % 10 == 0:  # Actualizar cada 10 mensajes
@@ -852,14 +900,44 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
             
             # Añadir mensaje al thread
             message_response = self.add_message_to_thread(thread_id, user_message)
-            if not message_response:
-                return None, {"error": "Error al añadir mensaje al thread"}
+            
+            # Verificar si la respuesta contiene error de timeout
+            if isinstance(message_response, dict) and "error_type" in message_response and message_response["error_type"] == "timeout":
+                logger.warning(f"Timeout al añadir mensaje al thread: {message_response.get('error', 'Timeout')}")
+                return None, {
+                    "error": "Timeout al añadir mensaje al thread",
+                    "texto_corregido": "El servicio de corrección está tardando demasiado en responder. Por favor, inténtelo de nuevo más tarde.",
+                    "errores": {
+                        "Gramática": [],
+                        "Léxico": [],
+                        "Puntuación": [],
+                        "Estructura textual": []
+                    }
+                }
+            
+            if not message_response or (isinstance(message_response, dict) and "id" not in message_response):
+                return None, {
+                    "error": "Error al añadir mensaje al thread",
+                    "texto_corregido": "No se pudo enviar el texto para su corrección.",
+                    "errores": {
+                        "Gramática": [],
+                        "Léxico": [],
+                        "Puntuación": [],
+                        "Estructura textual": []
+                    }
+                }
             
             # Ejecutar asistente con reintentos
             for attempt in range(max_retries):
                 try:
                     # Iniciar ejecución
                     run_response = self.run_assistant(thread_id, assistant_id)
+                    
+                    # Verificar si la respuesta contiene error de timeout
+                    if isinstance(run_response, dict) and "error_type" in run_response and run_response["error_type"] == "timeout":
+                        logger.warning(f"Timeout al iniciar ejecución del asistente: {run_response.get('error', 'Timeout')}")
+                        raise TimeoutError(f"Timeout al iniciar ejecución: {run_response.get('error', 'Timeout')}")
+                    
                     if not run_response or "id" not in run_response:
                         raise Exception("Error al iniciar ejecución del asistente")
                     
@@ -880,6 +958,12 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                         
                         # Consultar estado de la ejecución
                         run_status_response = self.get_run(thread_id, run_id)
+                        
+                        # Verificar si la respuesta contiene error de timeout
+                        if isinstance(run_status_response, dict) and "error_type" in run_status_response and run_status_response["error_type"] == "timeout":
+                            logger.warning(f"Timeout al obtener estado de ejecución: {run_status_response.get('error', 'Timeout')}")
+                            raise TimeoutError(f"Timeout al obtener estado: {run_status_response.get('error', 'Timeout')}")
+                        
                         if not run_status_response or "status" not in run_status_response:
                             raise Exception("Error al obtener estado de la ejecución")
                         
@@ -914,12 +998,20 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                     
                     # Obtener mensajes
                     messages_response = self.list_messages(thread_id)
+                    
+                    # Verificar si la respuesta contiene error de timeout
+                    if isinstance(messages_response, dict) and "error_type" in messages_response and messages_response["error_type"] == "timeout":
+                        logger.warning(f"Timeout al obtener mensajes del thread: {messages_response.get('error', 'Timeout')}")
+                        raise TimeoutError(f"Timeout al obtener mensajes: {messages_response.get('error', 'Timeout')}")
+                    
                     if not messages_response or "data" not in messages_response:
                         raise Exception("Error al obtener mensajes del thread")
                     
                     # Buscar la respuesta del asistente (primer mensaje en la lista)
+                    assistant_message_found = False
                     for message in messages_response["data"]:
                         if message["role"] == "assistant":
+                            assistant_message_found = True
                             # Extraer contenido
                             content_text = ""
                             for content_item in message.get("content", []):
@@ -932,6 +1024,34 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                             # Añadir thread_id
                             if isinstance(data_json, dict):
                                 data_json["thread_id"] = thread_id
+                            
+                            # Añadir texto original si no está incluido
+                            if isinstance(data_json, dict) and "texto_original" not in data_json:
+                                # Extraer texto original del mensaje del usuario
+                                # (podríamos tener que buscar el mensaje del usuario en la lista)
+                                for user_msg in messages_response["data"]:
+                                    if user_msg["role"] == "user":
+                                        user_text = ""
+                                        for content_item in user_msg.get("content", []):
+                                            if content_item["type"] == "text":
+                                                user_text += content_item["text"]["value"]
+                                        # Limpiar el mensaje del usuario para extraer solo el texto original
+                                        # (esto es una simplificación, podría requerir lógica más compleja)
+                                        # Por ahora, simplemente lo agregamos completo
+                                        data_json["texto_original"] = user_text
+                                        break
+                            
+                            # Asegurar que hay una estructura mínima
+                            if isinstance(data_json, dict):
+                                if "errores" not in data_json:
+                                    data_json["errores"] = {
+                                        "Gramática": [],
+                                        "Léxico": [],
+                                        "Puntuación": [],
+                                        "Estructura textual": []
+                                    }
+                                if "texto_corregido" not in data_json:
+                                    data_json["texto_corregido"] = content_text
                             
                             # Guardar métricas
                             tiempo_total = time.time() - tiempo_inicio
@@ -948,8 +1068,9 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                             logger.info(f"Solicitud completada en {tiempo_total:.2f}s")
                             return content_text, data_json
                     
-                    # Si no se encontró respuesta
-                    raise Exception("No se encontró respuesta del asistente")
+                    # Si no se encontró respuesta del asistente
+                    if not assistant_message_found:
+                        raise Exception("No se encontró respuesta del asistente en los mensajes")
                     
                 except TimeoutError as e:
                     logger.warning(f"Timeout en intento {attempt+1}/{max_retries}: {e}")
@@ -964,7 +1085,16 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                             longitud_texto=longitud_estimada,
                             resultado_exitoso=False
                         )
-                        return None, {"error": f"Timeout después de {max_retries} intentos"}
+                        return None, {
+                            "error": f"Timeout después de {max_retries} intentos",
+                            "texto_corregido": "Lo siento, el servicio de corrección está tardando demasiado en responder. Por favor, intenta nuevamente en unos momentos.",
+                            "errores": {
+                                "Gramática": [],
+                                "Léxico": [],
+                                "Puntuación": [],
+                                "Estructura textual": []
+                            }
+                        }
                     
                     # Esperar antes de reintentar
                     wait_time = min(60, 4 ** attempt)
@@ -984,7 +1114,16 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                             longitud_texto=longitud_estimada,
                             resultado_exitoso=False
                         )
-                        return None, {"error": f"Error: {str(e)}"}
+                        return None, {
+                            "error": f"Error: {str(e)}",
+                            "texto_corregido": "Lo siento, ha ocurrido un error al procesar tu texto. Por favor, intenta nuevamente.",
+                            "errores": {
+                                "Gramática": [],
+                                "Léxico": [],
+                                "Puntuación": [],
+                                "Estructura textual": []
+                            }
+                        }
                     
                     # Esperar antes de reintentar
                     wait_time = min(60, 2 ** attempt)
@@ -1002,7 +1141,16 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                 longitud_texto=longitud_estimada,
                 resultado_exitoso=False
             )
-            return None, {"error": f"Error general: {str(e)}"}
+            return None, {
+                "error": f"Error general: {str(e)}",
+                "texto_corregido": "Lo siento, ha ocurrido un error inesperado. Por favor, intenta nuevamente más tarde.",
+                "errores": {
+                    "Gramática": [],
+                    "Léxico": [],
+                    "Puntuación": [],
+                    "Estructura textual": []
+                }
+            }
 
 def get_clean_openai_assistants_client():
     """
