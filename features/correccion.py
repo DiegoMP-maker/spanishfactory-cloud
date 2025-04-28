@@ -32,23 +32,45 @@ def get_student_profile(user_id):
         dict: Perfil del estudiante o diccionario vacío si no está disponible
     """
     if not user_id:
+        logger.warning("User ID vacío en get_student_profile")
         return {}
     
     try:
         # Importar dinámicamente para evitar dependencias circulares
         from core.firebase_client import get_user_data
         
-        # Obtener datos del usuario
+        # Obtener datos del usuario con log detallado
+        logger.info(f"Obteniendo datos de usuario para UID: {user_id}")
         user_data = get_user_data(user_id)
         
-        # Extraer información relevante para el perfil
+        # Verificar si se obtuvo algún dato
+        if not user_data:
+            logger.warning(f"No se encontraron datos para el usuario {user_id} en Firebase")
+            return {}
+            
+        # Log para depuración
+        logger.info(f"Datos obtenidos de Firebase: {json.dumps({k: v for k, v in user_data.items() if k not in ['private_key', 'key']})}")
+        
+        # Verificar campos críticos en datos obtenidos
+        if "nivel" not in user_data:
+            logger.warning(f"Campo 'nivel' no encontrado en datos de usuario de Firebase")
+        if "numero_correcciones" not in user_data:
+            logger.warning(f"Campo 'numero_correcciones' no encontrado en datos de usuario de Firebase")
+        
+        # Extraer información relevante para el perfil con una correlación explícita
+        # El mapeo claro entre campos de Firebase y campos del perfil evita confusiones
         profile = {
+            # Mapeo explícito de "nivel" a "nivel_mcer"
             "nivel_mcer": user_data.get("nivel", "B1"),
             "idioma_nativo": user_data.get("idioma_nativo", ""),
             "objetivos_aprendizaje": user_data.get("objetivos_aprendizaje", []),
             "areas_interes": user_data.get("areas_interes", []),
             "numero_correcciones": user_data.get("numero_correcciones", 0)
         }
+        
+        # Log detallado para ver qué valores se están usando (reales o por defecto)
+        logger.info(f"Perfil construido: nivel_mcer={profile['nivel_mcer']} (por defecto: {'Sí' if 'nivel' not in user_data else 'No'})")
+        logger.info(f"Perfil construido: numero_correcciones={profile['numero_correcciones']} (por defecto: {'Sí' if 'numero_correcciones' not in user_data else 'No'})")
         
         # Añadir estadísticas de errores si están disponibles
         if "errores_por_tipo" in user_data:
@@ -57,11 +79,20 @@ def get_student_profile(user_id):
         # Añadir preferencias de feedback si están disponibles
         if "preferencias_feedback" in user_data:
             profile["preferencias_feedback"] = user_data["preferencias_feedback"]
+        
+        # Asegurar que el usuario tenga todos los campos necesarios para futuras correcciones
+        try:
+            from core.firebase_client import ensure_profile_fields
+            ensure_profile_fields(user_id)
+        except Exception as e:
+            logger.warning(f"No se pudieron asegurar campos de perfil: {e}")
             
         return profile
     
     except Exception as e:
+        error_details = traceback.format_exc()
         logger.error(f"Error obteniendo perfil del estudiante: {str(e)}")
+        logger.debug(f"Detalles del error:\n{error_details}")
         return {}
 
 # System prompt completo para el asistente de corrección
