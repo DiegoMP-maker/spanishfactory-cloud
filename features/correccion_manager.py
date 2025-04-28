@@ -21,7 +21,7 @@ from core.session_manager import get_user_info, get_session_var, set_session_var
 from features.functions_definitions import get_evaluation_criteria
 
 # Importar explícitamente ambas funciones para evitar errores
-from core.firebase_client import save_correccion
+from core.firebase_client import save_correction_with_stats
 
 logger = logging.getLogger(__name__)
 
@@ -259,51 +259,15 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
                 "texto_original": texto_input
             }
         
-        # Obtener información del perfil del usuario si está disponible
-        perfil_usuario = {}
-        if user_id:
-            try:
-                perfil_usuario = get_user_profile_data(user_id)
-                logger.info(f"Perfil recuperado para usuario {user_id}")
-            except Exception as profile_error:
-                logger.warning(f"Error obteniendo perfil: {str(profile_error)}")
-        
-        # Preparar mensaje para el asistente con más contexto
-        user_message = f"""
-Por favor, corrige el siguiente texto de nivel {nivel}. 
-Nivel de detalle: {detalle}. 
-Idioma para explicaciones: {idioma}.
-
-TEXTO PARA CORREGIR:
-"{texto_input}"
-
-INSTRUCCIONES IMPORTANTES:
-1. Tu respuesta DEBE estar en formato JSON, siguiendo exactamente la estructura solicitada en las instrucciones.
-2. Es OBLIGATORIO incluir los campos "saludo", "tipo_texto", "errores", "texto_corregido", "analisis_contextual" y "consejo_final".
-3. Utiliza la función 'get_evaluation_criteria' para obtener criterios específicos para este nivel.
-4. Utiliza 'get_user_profile' si necesitas información detallada del estudiante.
-5. No escribas ningún texto fuera del objeto JSON.
-
-Asegúrate de que tu respuesta comience con '{' y termine con '}', y que sea un JSON válido.
-"""
-        
-        # Si tenemos información de perfil, incluirla
-        if perfil_usuario:
-            # Añadir información contextual del perfil
-            user_message += f"""
-PERFIL DEL ESTUDIANTE:
-- Nivel MCER: {perfil_usuario.get('nivel_mcer', nivel)}
-- Idioma nativo: {perfil_usuario.get('idioma_nativo', 'No especificado')}
-- Objetivos de aprendizaje: {', '.join(perfil_usuario.get('objetivos_aprendizaje', ['No especificados']))}
-- Número de correcciones previas: {perfil_usuario.get('numero_correcciones', 0)}
-"""
-            
-            # Añadir estadísticas de errores si están disponibles
-            if "estadisticas_errores" in perfil_usuario and perfil_usuario["estadisticas_errores"]:
-                user_message += "- Áreas con dificultades:\n"
-                for tipo, cantidad in perfil_usuario["estadisticas_errores"].items():
-                    if cantidad > 0:
-                        user_message += f"  - {tipo}: {cantidad} errores\n"
+        # Preparar mensaje para el asistente
+        user_message = (
+            f"Por favor, corrige el siguiente texto de nivel {nivel}. " 
+            f"Nivel de detalle: {detalle}. Idioma para explicaciones: {idioma}.\n\n"
+            f"TEXTO PARA CORREGIR:\n\"{texto_input}\"\n\n"
+            f"Por favor, analiza y corrige todos los errores. Utiliza la función 'get_evaluation_criteria' "
+            f"para obtener los criterios específicos para este nivel y 'get_user_profile' si necesitas "
+            f"información detallada del estudiante."
+        )
         
         # Procesar con OpenAI Assistants v2 usando function calling
         logger.info(f"Enviando texto de longitud {len(texto_input)} a procesar")
@@ -342,12 +306,22 @@ PERFIL DEL ESTUDIANTE:
             
             # Si hay contenido pero no JSON válido, intentar extraer manualmente
             if content:
-                # Importar extract_json_safely desde clean_openai_assistant
-                from core.clean_openai_assistant import extract_json_safely
+                # Intentar extraer JSON con regex
+                json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group(1))
+                        logger.info("JSON extraído con regex de código")
+                    except json.JSONDecodeError:
+                        logger.warning("Error decodificando JSON dentro de bloques de código")
                 
-                # Intentar extraer JSON del contenido
-                data = extract_json_safely(content)
-                logger.info("JSON extraído manualmente del content")
+                # Si no hay coincidencia, intentar parsear todo el contenido
+                if not isinstance(data, dict) or "errores" not in data:
+                    try:
+                        data = json.loads(content)
+                        logger.info("Content completo procesado como JSON")
+                    except json.JSONDecodeError:
+                        logger.warning("El content no es un JSON válido")
             
             # Si aún no tenemos datos válidos, crear estructura mínima
             if not isinstance(data, dict) or "errores" not in data:
@@ -382,9 +356,7 @@ PERFIL DEL ESTUDIANTE:
                 errores_conteo = {}
                 errores = data.get("errores", {})
                 for categoria, lista_errores in errores.items():
-                    # Normalizar categoría (minúsculas)
-                    cat_norm = categoria.lower()
-                    errores_conteo[cat_norm] = len(lista_errores) if isinstance(lista_errores, list) else 0
+                    errores_conteo[categoria.lower()] = len(lista_errores) if isinstance(lista_errores, list) else 0
                 
                 # Extraer puntuación global (promedio de análisis contextual)
                 puntuacion_global = 0
@@ -394,7 +366,7 @@ PERFIL DEL ESTUDIANTE:
                 for seccion in ["coherencia", "cohesion", "registro_linguistico", "adecuacion_cultural"]:
                     if seccion in analisis and "puntuacion" in analisis[seccion]:
                         try:
-                            puntuacion_global += float(analisis[seccion]["puntuacion"])
+                            puntuacion_global += analisis[seccion]["puntuacion"]
                             num_puntuaciones += 1
                         except (TypeError, ValueError):
                             pass
@@ -405,11 +377,7 @@ PERFIL DEL ESTUDIANTE:
                 else:
                     puntuacion_global = 5.0  # Valor por defecto
                 
-                # Guardar en Firebase usando la función correcta
-                # Importar explícitamente para evitar el error de nombre no definido
-                from core.firebase_client import save_correction_with_stats
-                
-                # Llamar a la función correcta
+                # Guardar en Firebase
                 correccion_id = save_correction_with_stats(
                     user_id=user_id,
                     texto_original=texto_input,
@@ -419,11 +387,7 @@ PERFIL DEL ESTUDIANTE:
                     puntuacion=puntuacion_global
                 )
                 
-                if correccion_id:
-                    logger.info(f"Corrección guardada para usuario {user_id} con ID {correccion_id}")
-                else:
-                    logger.warning(f"No se pudo guardar la corrección para usuario {user_id}")
-                
+                logger.info(f"Corrección guardada para usuario {user_id} con ID {correccion_id}")
             except Exception as firebase_error:
                 logger.error(f"Error guardando corrección en Firebase: {str(firebase_error)}")
                 logger.debug(traceback.format_exc())
@@ -441,15 +405,42 @@ PERFIL DEL ESTUDIANTE:
         logger.error(f"Error corrigiendo texto: {str(e)}")
         logger.debug(f"Detalles del error:\n{error_details}")
         
-        # Registrar fallo en el circuit breaker
-        circuit_breaker.record_failure("openai", error_type=str(type(e).__name__))
-        
-        # Crear respuesta de error con información útil
-        error_response = {
-            "error": True,
-            "mensaje": f"Se produjo un error durante la corrección: {str(e)}",
-            "texto_original": texto_input if 'texto_input' in locals() else "No disponible"
-        }
+        # Detectar errores 500 del servidor de OpenAI
+        is_server_error = False
+        error_str = str(e).lower()
+        if "500" in error_str or "internal server error" in error_str:
+            is_server_error = True
+            logger.warning("Detectado error 500 del servidor OpenAI. Reiniciando thread...")
+            # Importar función de reinicio
+            from core.clean_openai_assistant import reset_thread
+            # Reiniciar thread
+            new_thread_id = reset_thread(user_id)
+            if new_thread_id:
+                logger.info(f"Thread reiniciado exitosamente. ID: {new_thread_id}")
+                # Mensaje específico para errores de servidor
+                error_response = {
+                    "error": True,
+                    "mensaje": "Hubo un problema en el servidor. Se ha reiniciado la sesión. Por favor, intenta nuevamente.",
+                    "texto_original": texto_input if 'texto_input' in locals() else "No disponible",
+                    "thread_reiniciado": True
+                }
+            else:
+                # Falló el reinicio
+                error_response = {
+                    "error": True,
+                    "mensaje": "Error en el servidor de OpenAI. No se pudo reiniciar la sesión.",
+                    "texto_original": texto_input if 'texto_input' in locals() else "No disponible"
+                }
+        else:
+            # Para otros errores, mantener el comportamiento original
+            circuit_breaker.record_failure("openai", error_type=str(type(e).__name__))
+            
+            # Crear respuesta de error con información útil
+            error_response = {
+                "error": True,
+                "mensaje": f"Se produjo un error durante la corrección: {str(e)}",
+                "texto_original": texto_input if 'texto_input' in locals() else "No disponible"
+            }
         
         # Añadir información detallada de depuración
         from config.settings import IS_DEV
@@ -485,6 +476,10 @@ def mostrar_resultado_correccion(resultado):
         if "error" in resultado and resultado["error"]:
             mensaje_error = resultado.get("mensaje", "Error desconocido durante la corrección")
             st.error(mensaje_error)
+            
+            # Si el thread se reinició, mostrar mensaje específico
+            if resultado.get("thread_reiniciado"):
+                st.info("La sesión ha sido reiniciada debido a un error interno. Por favor, intenta nuevamente tu corrección.")
             
             # Información de depuración (solo en desarrollo)
             if "debug_info" in resultado:
