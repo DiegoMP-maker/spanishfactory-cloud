@@ -1,6 +1,209 @@
-import logging
+# Versión mejorada para ser usada por correccion_manager.py
+def save_correccion(user_id, texto_original, texto_corregido, nivel, errores, puntuacion=None):
+    """
+    Guarda una corrección de texto en Firestore.
+    Esta es una función wrapper que utiliza la implementación transaccional.
+    
+    Args:
+        user_id (str): ID del usuario
+        texto_original (str): Texto original sin corregir
+        texto_corregido (str): Texto ya corregido
+        nivel (str): Nivel de español del estudiante (A1-C2)
+        errores (dict): Diccionario con conteo de errores por categoría
+        puntuacion (float, opcional): Puntuación asignada a la corrección
+        
+    Returns:
+        str: ID del documento creado o None si hubo error
+    """
+    return save_correction_with_stats(
+        user_id=user_id,
+        texto_original=texto_original,
+        texto_corregido=texto_corregido,
+        nivel=nivel,
+        errores=errores,
+        puntuacion=puntuacion
+    )def get_error_statistics(user_id):
+    """
+    Obtiene estadísticas detalladas de errores del estudiante.
+    
+    Args:
+        user_id (str): ID del usuario
+        
+    Returns:
+        dict: Estadísticas de errores
+    """
+    try:
+        # Validar parámetro
+        if not user_id:
+            logger.warning("user_id vacío en get_error_statistics")
+            return {}
+        
+        # Obtener datos del usuario
+        user_data = get_user_data(user_id)
+        
+        if not user_data or "errores_por_tipo" not in user_data:
+            logger.warning(f"No se encontraron estadísticas para el usuario {user_id}")
+            return {
+                "errores_por_tipo": {},
+                "total_correcciones": 0,
+                "areas_problematicas": []
+            }
+        
+        # Obtener estadísticas
+        errores_por_tipo = user_data.get("errores_por_tipo", {})
+        numero_correcciones = user_data.get("numero_correcciones", 0)
+        
+        # Identificar áreas problemáticas (más de 5 errores)
+        areas_problematicas = []
+        for tipo, cantidad in errores_por_tipo.items():
+            if cantidad > 5:
+                areas_problematicas.append({
+                    "tipo": tipo,
+                    "cantidad": cantidad
+                })
+        
+        # Ordenar por cantidad descendente
+        areas_problematicas.sort(key=lambda x: x["cantidad"], reverse=True)
+        
+        estadisticas = {
+            "errores_por_tipo": errores_por_tipo,
+            "total_correcciones": numero_correcciones,
+            "areas_problematicas": areas_problematicas
+        }
+        
+        logger.info(f"Estadísticas recuperadas para usuario {user_id}")
+        return estadisticas
+    
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error en get_error_statistics: {str(e)}")
+        logger.debug(f"Detalles del error:\n{error_details}")
+        return {
+            "error": f"Error obteniendo estadísticas: {str(e)}",
+            "errores_por_tipo": {},
+            "total_correcciones": 0,
+            "areas_problematicas": []
+        }def save_correction_with_stats(user_id, texto_original, texto_corregido, nivel, errores, puntuacion=None):
+    """
+    Guarda una corrección de texto en Firestore y actualiza estadísticas en una 
+    única transacción para garantizar consistencia.
+    
+    Args:
+        user_id (str): ID del usuario
+        texto_original (str): Texto original sin corregir
+        texto_corregido (str): Texto ya corregido
+        nivel (str): Nivel de español del estudiante (A1-C2)
+        errores (dict): Diccionario con conteo de errores por categoría
+        puntuacion (float, opcional): Puntuación asignada a la corrección
+        
+    Returns:
+        str: ID del documento creado o None si hubo error
+    """
+    try:
+        # Verificar datos mínimos
+        if not user_id:
+            logger.warning("user_id vacío en save_correction_with_stats")
+            return None
+        
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            logger.error("No se pudo inicializar Firebase en save_correction_with_stats")
+            return None
+        
+        # Obtener colección y documento de usuario
+        users_col = db.collection(FIREBASE_COLLECTION_USERS)
+        user_doc = users_col.document(user_id)
+        corrections_col = user_doc.collection(FIREBASE_COLLECTION_CORRECTIONS)
+        
+        # Preparar datos de la corrección
+        correction_data = {
+            "uid": user_id,
+            "texto_original": texto_original,
+            "texto_corregido": texto_corregido,
+            "nivel": nivel,
+            "errores": errores,
+            "timestamp": time.time(),
+            "fecha": time.time()  # Para compatibilidad con funciones existentes
+        }
+        
+        # Añadir puntuación si está disponible
+        if puntuacion is not None:
+            correction_data["puntuacion"] = puntuacion
+        
+        # Iniciar transacción para garantizar consistencia
+        @firestore.transactional
+        def update_in_transaction(transaction, user_ref, correction_data, errores):
+            # Obtener documento actual del usuario
+            user_doc = user_ref.get(transaction=transaction)
+            
+            # Preparar actualización de estadísticas
+            if user_doc.exists:
+                user_data = user_doc.to_dict()
+                
+                # Actualizar contadores de errores
+                errores_por_tipo = user_data.get("errores_por_tipo", {})
+                
+                # Normalizar claves de errores a minúsculas
+                for key, value in errores.items():
+                    key_lower = key.lower()
+                    if key_lower not in errores_por_tipo:
+                        errores_por_tipo[key_lower] = 0
+                    
+                    # Asegurar que el valor es un entero
+                    try:
+                        value_int = int(value)
+                        errores_por_tipo[key_lower] += value_int
+                    except (ValueError, TypeError):
+                        logger.warning(f"Valor no numérico para errores: {key}={value}")
+                
+                # Actualizar número de correcciones
+                num_correcciones = user_data.get("numero_correcciones", 0) + 1
+                
+                # Preparar actualización
+                user_update = {
+                    "errores_por_tipo": errores_por_tipo,
+                    "numero_correcciones": num_correcciones,
+                    "ultima_correccion": time.time()
+                }
+                
+                # Actualizar documento del usuario
+                transaction.update(user_ref, user_update)
+            else:
+                # Si el usuario no existe, crearlo con valores iniciales
+                user_data = STUDENT_PROFILE_SCHEMA.copy()
+                user_data["uid"] = user_id
+                user_data["creado"] = time.time()
+                user_data["errores_por_tipo"] = errores
+                user_data["numero_correcciones"] = 1
+                user_data["ultima_correccion"] = time.time()
+                
+                # Crear documento del usuario
+                transaction.set(user_ref, user_data)
+            
+            # Crear documento de corrección
+            new_correction_ref = corrections_col.document()
+            transaction.set(new_correction_ref, correction_data)
+            
+            # Devolver ID del documento creado
+            return new_correction_ref.id
+        
+        # Ejecutar transacción
+        transaction = db.transaction()
+        correction_id = update_in_transaction(transaction, user_doc, correction_data, errores)
+        
+        logger.info(f"Corrección guardada para usuario {user_id}: {correction_id} con actualización de estadísticas")
+        return correction_id
+    
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error en save_correction_with_stats: {str(e)}")
+        logger.debug(f"Detalles del error:\n{error_details}")
+        return Noneimport logging
 import time
 import os
+import traceback
 from typing import Dict, Any, Tuple, List, Optional, Union
 
 import streamlit as st
@@ -811,6 +1014,7 @@ def get_user_data(uid):
         error_details = traceback.format_exc()
         logger.error(f"Error en get_user_data: {e}")
         logger.debug(f"Detalles del error:\n{error_details}")
+        return {}
 
 def update_user_data(uid: str, data: Dict[str, Any]) -> bool:
     """
@@ -1541,326 +1745,73 @@ def obtener_historial_consignas(uid: str) -> List[Dict[str, Any]]:
         logger.error(f"Error obteniendo historial de consignas: {e}")
         return []
     
-def save_correccion(user_id, texto_original, texto_corregido, nivel, errores, puntuacion=None):
+# Nuevas funciones de la solución para el problema TextoCorrector ELE
+
+def get_student_profile(user_id):
     """
-    Guarda una corrección de texto en Firestore.
+    Obtiene el perfil completo del estudiante desde Firebase, siguiendo
+    el formato estándar requerido por los Assistants.
     
     Args:
         user_id (str): ID del usuario
-        texto_original (str): Texto original sin corregir
-        texto_corregido (str): Texto ya corregido
-        nivel (str): Nivel de español del estudiante (A1-C2)
-        errores (dict): Diccionario con conteo de errores por categoría
-        puntuacion (float, opcional): Puntuación asignada a la corrección
         
     Returns:
-        str: ID del documento creado o None si hubo error
+        dict: Perfil del estudiante o diccionario vacío si no está disponible
     """
-    import time
+    if not user_id:
+        logger.warning("User ID vacío en get_student_profile")
+        return {}
     
     try:
-        # Verificar datos mínimos
-        if not user_id:
-            logger.warning("user_id vacío en save_correccion")
-            return None
+        # Obtener datos del usuario
+        user_data = get_user_data(user_id)
         
-        # Inicializar Firebase
-        db, success = initialize_firebase()
+        if not user_data:
+            logger.warning(f"No se encontraron datos para el usuario {user_id} en Firebase")
+            return {}
+            
+        # Log para depuración
+        logger.info(f"Datos obtenidos de Firebase: {json.dumps({k: v for k, v in user_data.items() if k not in ['private_key', 'key']})}")
         
-        if not success or not db:
-            logger.error("No se pudo inicializar Firebase en save_correccion")
-            return None
-        
-        # Preparar datos de la corrección
-        correction_data = {
-            "uid": user_id,
-            "texto_original": texto_original,
-            "texto_corregido": texto_corregido,
-            "nivel": nivel,
-            "errores": errores,
-            "timestamp": time.time(),
-            "fecha": time.time()  # Para compatibilidad con funciones existentes
+        # Extraer información relevante para el perfil con una correlación explícita
+        profile = {
+            # Datos básicos
+            "nivel_mcer": user_data.get("nivel", "B1"),
+            "idioma_nativo": user_data.get("idioma_nativo", ""),
+            "objetivos_aprendizaje": user_data.get("objetivos_aprendizaje", []),
+            "areas_interes": user_data.get("areas_interes", []),
+            "numero_correcciones": user_data.get("numero_correcciones", 0),
+            
+            # Preferencias de feedback
+            "preferencias_feedback": user_data.get("preferencias_feedback", {
+                "estilo": "detallado",
+                "priorizar_areas": []
+            }),
+            
+            # Estadísticas de errores
+            "estadisticas_errores": user_data.get("errores_por_tipo", {
+                "gramatica": 0,
+                "lexico": 0,
+                "puntuacion": 0,
+                "estructura_textual": 0,
+                "estilo": 0
+            })
         }
         
-        # Añadir puntuación si está disponible
-        if puntuacion is not None:
-            correction_data["puntuacion"] = puntuacion
+        # Log detallado para ver qué valores se están usando
+        logger.info(f"Perfil construido: nivel_mcer={profile['nivel_mcer']} (por defecto: {'Sí' if 'nivel' not in user_data else 'No'})")
+        logger.info(f"Perfil construido: numero_correcciones={profile['numero_correcciones']} (por defecto: {'Sí' if 'numero_correcciones' not in user_data else 'No'})")
         
-        # Guardar en colección de correcciones del usuario
-        doc_ref = db.collection(FIREBASE_COLLECTION_USERS).document(user_id) \
-                    .collection(FIREBASE_COLLECTION_CORRECTIONS).document()
-        
-        # Guardar
-        doc_ref.set(correction_data)
-        
-        # Actualizar conteo de errores
+        # Asegurar que el usuario tenga todos los campos necesarios para futuras correcciones
         try:
-            actualizar_conteo_errores(user_id, errores)
+            ensure_profile_fields(user_id)
         except Exception as e:
-            logger.warning(f"No se pudo actualizar conteo de errores: {e}")
-        
-        logger.info(f"Corrección guardada para usuario {user_id}: {doc_ref.id}")
-        return doc_ref.id
+            logger.warning(f"No se pudieron asegurar campos de perfil: {e}")
+            
+        return profile
     
     except Exception as e:
-        logger.error(f"Error en save_correccion: {e}")
-        return None
-
-    
-def actualizar_conteo_errores(uid, nuevos_errores):
-    """
-    Actualiza el conteo de errores por tipo para un usuario.
-    Utiliza una transacción de Firestore para garantizar actualizaciones atómicas.
-    
-    Args:
-        uid (str): ID del usuario
-        nuevos_errores (dict): Diccionario con conteo de nuevos errores por tipo
-        
-    Returns:
-        bool: True si la actualización fue exitosa, False en caso contrario
-    """
-    import datetime
-    
-    try:
-        if not uid:
-            logger.warning("UID vacío en actualizar_conteo_errores")
-            return False
-        
-        # Verificar nuevos_errores
-        if not isinstance(nuevos_errores, dict):
-            logger.warning(f"El parámetro nuevos_errores debe ser un diccionario, no {type(nuevos_errores)}")
-            return False
-            
-        # Normalizar keys a lowercase
-        errores_normalizados = {}
-        for key, value in nuevos_errores.items():
-            # Convertir clave a minúsculas
-            key_norm = key.lower()
-            # Mapeo de claves
-            if 'gram' in key_norm:
-                key_norm = 'gramatica'
-            elif 'lex' in key_norm or 'vocab' in key_norm:
-                key_norm = 'lexico'
-            elif 'estil' in key_norm:
-                key_norm = 'estilo'
-            elif 'puntu' in key_norm:
-                key_norm = 'puntuacion'
-            elif 'estruct' in key_norm:
-                key_norm = 'estructura_textual'
-                
-            # Asegurar que el valor es un entero
-            try:
-                value_int = int(value)
-                errores_normalizados[key_norm] = value_int
-            except (ValueError, TypeError):
-                logger.warning(f"Valor no numérico para errores: {key}={value}")
-        
-        # Si no hay errores válidos, salir
-        if not errores_normalizados:
-            logger.warning("No se encontraron errores válidos para actualizar")
-            return False
-            
-        # Inicializar Firebase
-        db, success = initialize_firebase()
-        
-        if not success or not db:
-            logger.error("No se pudo inicializar Firebase")
-            return False
-        
-        # Referencia al documento del usuario
-        doc_ref = db.collection(FIREBASE_COLLECTION_USERS).document(uid)
-        # Realizar actualización en una transacción
-        @firestore.transactional
-        def actualizar_en_transaccion(transaction, ref):
-            # Obtener documento actual
-            doc = ref.get(transaction=transaction)
-            
-            if not doc.exists:
-                logger.warning(f"No existe documento para usuario {uid}")
-                return False
-            
-            # Obtener datos actuales
-            user_data = doc.to_dict()
-            
-            # Asegurar que el usuario tenga todos los campos del perfil
-            # Esto garantiza que existe la estructura errores_por_tipo
-            missing_fields = {}
-            for field, default_value in STUDENT_PROFILE_SCHEMA.items():
-                if field not in user_data:
-                    missing_fields[field] = default_value
-            
-            if missing_fields:
-                # Actualizar campos faltantes
-                transaction.update(ref, missing_fields)
-                # Recuperar el documento actualizado
-                doc = ref.get(transaction=transaction)
-                user_data = doc.to_dict()
-            
-            # Inicializar o obtener estructura de errores
-            errores_actuales = user_data.get("errores_por_tipo", {})
-            
-            # Actualizar contadores para cada tipo de error
-            for tipo, cantidad in errores_normalizados.items():
-                if tipo not in errores_actuales:
-                    errores_actuales[tipo] = 0
-                    
-                errores_actuales[tipo] += cantidad
-            
-            # Actualizar número de correcciones
-            num_correcciones = user_data.get("numero_correcciones", 0) + 1
-            
-            # Preparar datos a actualizar
-            datos_actualizados = {
-                "errores_por_tipo": errores_actuales,
-                "numero_correcciones": num_correcciones,
-                "ultima_correccion": datetime.datetime.now().isoformat()
-            }
-            
-            # Ejecutar actualización
-            transaction.update(ref, datos_actualizados)
-            logger.info(f"Actualizado conteo de errores para usuario {uid}: {errores_normalizados}")
-            
-            return True
-        
-        # Ejecutar la transacción
-        transaction = db.transaction()
-        resultado = actualizar_en_transaccion(transaction, doc_ref)
-        
-        return resultado
-        
-    except Exception as e:
-        logger.error(f"Error actualizando conteo de errores: {e}")
-        return False
-
-def migrate_user_profiles():
-    """
-    Migra todos los perfiles de usuario existentes para añadir los nuevos campos del perfil expandido.
-    Útil para actualizar usuarios existentes cuando se añaden nuevos campos al esquema.
-    
-    Returns:
-        tuple: (actualizados, fallidos, total) - Conteo de usuarios actualizados, fallidos y total
-    """
-    try:
-        # Inicializar Firebase
-        db, success = initialize_firebase()
-        
-        if not success or not db:
-            logger.error("No se pudo inicializar Firebase en migrate_user_profiles")
-            return 0, 0, 0
-        
-        # Obtener todos los documentos de usuarios
-        users_ref = db.collection(FIREBASE_COLLECTION_USERS)
-        users_docs = users_ref.stream()
-        
-        actualizados = 0
-        fallidos = 0
-        total = 0
-        
-        # Iterar sobre cada usuario
-        for doc in users_docs:
-            total += 1
-            uid = doc.id
-            
-            try:
-                # Intentar actualizar perfil
-                if ensure_profile_fields(uid):
-                    actualizados += 1
-                    logger.info(f"Perfil actualizado para usuario {uid}")
-                else:
-                    logger.info(f"Usuario {uid} ya tiene todos los campos")
-            except Exception as user_error:
-                fallidos += 1
-                logger.error(f"Error actualizando perfil para usuario {uid}: {user_error}")
-        
-        logger.info(f"Migración completada: {actualizados} actualizados, {fallidos} fallidos, {total} total")
-        return actualizados, fallidos, total
-    
-    except Exception as e:
-        logger.error(f"Error en migrate_user_profiles: {e}")
-        return 0, 0, 0
-
-def update_all_user_thread_profiles():
-    """
-    Actualiza todos los usuarios con threads existentes, enviando un mensaje con su perfil expandido.
-    Esto asegura que todos los threads tengan información actualizada del perfil del estudiante.
-    
-    Returns:
-        tuple: (actualizados, fallidos, total) - Conteo de threads actualizados, fallidos y total
-    """
-    try:
-        # Importar módulos necesarios
-        from core.openai_integration import get_user_profile_data
-        from core.clean_openai_assistant import get_clean_openai_assistants_client
-        
-        # Inicializar Firebase
-        db, success = initialize_firebase()
-        
-        if not success or not db:
-            logger.error("No se pudo inicializar Firebase en update_all_user_thread_profiles")
-            return 0, 0, 0
-        
-        # Obtener cliente de OpenAI Assistants
-        assistants_client = get_clean_openai_assistants_client()
-        if not assistants_client:
-            logger.error("No se pudo obtener cliente de OpenAI Assistants")
-            return 0, 0, 0
-        
-        # Obtener usuarios con thread_id
-        users_ref = db.collection(FIREBASE_COLLECTION_USERS)
-        users_with_thread = users_ref.where("thread_id", "!=", None).stream()
-        
-        actualizados = 0
-        fallidos = 0
-        total = 0
-        
-        # Iterar sobre cada usuario con thread
-        for doc in users_with_thread:
-            total += 1
-            uid = doc.id
-            user_data = doc.to_dict()
-            thread_id = user_data.get("thread_id")
-            
-            try:
-                # Verificar que el thread existe
-                if not assistants_client.verify_thread(thread_id):
-                    logger.warning(f"Thread inválido para usuario {uid}: {thread_id}")
-                    fallidos += 1
-                    continue
-                
-                # Obtener perfil completo
-                profile_data = get_user_profile_data(uid)
-                if not profile_data:
-                    logger.warning(f"No se pudo obtener perfil para usuario {uid}")
-                    fallidos += 1
-                    continue
-                
-                # Crear mensaje con la información de perfil
-                profile_message = f"""
-ACTUALIZACIÓN DE PERFIL DEL ESTUDIANTE:
-```json
-{json.dumps(profile_data, indent=2, ensure_ascii=False)}
-```
-
-Por favor, adapta tus correcciones según este perfil actualizado.
-"""
-                # Añadir mensaje al thread
-                message_response = assistants_client.add_message_to_thread(thread_id, profile_message)
-                
-                if message_response and "id" in message_response:
-                    actualizados += 1
-                    logger.info(f"Perfil actualizado en thread {thread_id} para usuario {uid}")
-                else:
-                    fallidos += 1
-                    logger.error(f"Error al añadir mensaje al thread {thread_id} para usuario {uid}")
-            
-            except Exception as e:
-                fallidos += 1
-                logger.error(f"Error actualizando thread para usuario {uid}: {e}")
-        
-        logger.info(f"Actualización de threads completada: {actualizados} actualizados, {fallidos} fallidos, {total} total")
-        return actualizados, fallidos, total
-    
-    except Exception as e:
-        logger.error(f"Error en update_all_user_thread_profiles: {e}")
-        return 0, 0, 0
-
+        error_details = traceback.format_exc()
+        logger.error(f"Error obteniendo perfil del estudiante: {str(e)}")
+        logger.debug(f"Detalles del error:\n{error_details}")
+        return {}
