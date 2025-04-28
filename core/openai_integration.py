@@ -12,6 +12,7 @@ import streamlit as st
 import time
 import json
 import traceback
+import re
 
 # Importaciones de módulos del proyecto
 from core.clean_openai_assistant import get_clean_openai_assistants_client
@@ -242,6 +243,121 @@ def process_function_calls(assistant_id, thread_id, run_id, client):
         logger.debug(f"Detalles del error:\n{error_details}")
         return False
 
+def process_with_assistant_with_rate_limiting(system_message, user_message, task_type="default", thread_id=None, user_id=None):
+    """
+    Versión mejorada de process_with_assistant con rate limiting y backoff exponencial.
+    Maneja específicamente errores de límite de tasa (TPM) de OpenAI.
+    
+    Args:
+        system_message (str): Mensaje del sistema (instrucciones)
+        user_message (str): Mensaje del usuario (contenido)
+        task_type (str): Tipo de tarea ('correccion_texto', 'generacion_ejercicios', etc.)
+        thread_id (str, opcional): ID del thread existente
+        user_id (str, opcional): ID del usuario
+        
+    Returns:
+        tuple: (respuesta_raw, resultado_json)
+    """
+    max_retries = 5
+    base_delay = 2  # segundos
+    
+    for attempt in range(max_retries):
+        try:
+            # Intentar procesar normalmente
+            return process_with_assistant(system_message, user_message, task_type, thread_id, user_id)
+        except Exception as e:
+            error_message = str(e)
+            
+            # Verificar si es un error de límite de tasa
+            is_rate_limit = any(pattern in error_message.lower() for pattern in 
+                               ["tokens per min (tpm)", "rate limit", "too many requests", "request too large"])
+            
+            if is_rate_limit:
+                logger.warning(f"Rate limit alcanzado (intento {attempt+1}/{max_retries})")
+                
+                # Cálculo de backoff exponencial
+                delay = base_delay * (2 ** attempt)
+                logger.info(f"Esperando {delay} segundos antes de reintentar...")
+                time.sleep(delay)
+                
+                if attempt == max_retries - 1:
+                    # Si es el último intento, informar al usuario
+                    logger.error(f"Se superó el número máximo de reintentos ({max_retries}) para el error de rate limit")
+                    return None, {
+                        "error": True,
+                        "mensaje": "El servicio está procesando demasiadas solicitudes en este momento. Por favor, intenta nuevamente en unos minutos.",
+                        "texto_original": user_message
+                    }
+            else:
+                # Si no es un error de tasa, propagar la excepción
+                logger.error(f"Error no relacionado con rate limit: {error_message}")
+                raise
+
+def is_long_text(texto):
+    """
+    Determina si un texto es considerado largo basado en el conteo de palabras.
+    
+    Args:
+        texto (str): Texto a analizar
+        
+    Returns:
+        bool: True si el texto es largo, False en caso contrario
+    """
+    palabras = len(texto.split())
+    return palabras > 200  # Consideramos largo si tiene más de 200 palabras
+
+# Sistema principal de selección de prompts basado en la longitud del texto
+def seleccionar_prompt_por_longitud(texto_input, system_prompt_completo, sistema_prompt_conciso=None):
+    """
+    Selecciona el prompt apropiado según la longitud del texto.
+    
+    Args:
+        texto_input (str): Texto del usuario a procesar
+        system_prompt_completo (str): Prompt completo del sistema
+        sistema_prompt_conciso (str, opcional): Versión concisa del prompt
+        
+    Returns:
+        str: El prompt seleccionado
+    """
+    # Si no se proporciona un prompt conciso, usar el completo en todos los casos
+    if not sistema_prompt_conciso:
+        return system_prompt_completo
+        
+    # Seleccionar prompt según longitud
+    if is_long_text(texto_input):
+        logger.info(f"Usando prompt conciso para texto de {len(texto_input.split())} palabras")
+        return sistema_prompt_conciso
+    else:
+        logger.info(f"Usando prompt completo para texto de {len(texto_input.split())} palabras")
+        return system_prompt_completo
+
+# Versión concisa del prompt del sistema para textos largos
+SYSTEM_PROMPT_CORRECTION_CONCISE = """🧩 Contexto: Eres un corrector ELE que debe aplicar criterios estrictos según niveles MCER.
+
+Consulta siempre el documento "base_criterios_evaluacion_niveles_mcer.md" (vs_680e701439748191be95055ca9f55531) para asegurar evaluación rigurosa.
+
+📋 Responde con estructura JSON:
+{
+  "saludo": "string",
+  "tipo_texto": "string",
+  "errores": {
+    "Gramática": [...],
+    "Léxico": [...],
+    "Puntuación": [...],
+    "Estructura textual": [...]
+  },
+  "texto_corregido": "string",
+  "analisis_contextual": {...},
+  "consejo_final": "string"
+}
+
+Los errores deben tener campos: "fragmento_erroneo", "correccion", "explicacion"
+Las explicaciones en {idioma}. El texto corregido y consejo en español.
+
+Considera el nivel MCER para determinar la gravedad de los errores. Sé crítico pero constructivo.
+IMPORTANTE: Debe ser un JSON válido sin texto adicional, estructura exacta.
+"""
+
 def process_with_assistant(system_message, user_message, task_type="default", thread_id=None, user_id=None):
     """
     Procesa un mensaje con el asistente de OpenAI usando el cliente limpio.
@@ -257,6 +373,24 @@ def process_with_assistant(system_message, user_message, task_type="default", th
     Returns:
         tuple: (respuesta_raw, resultado_json)
     """
+    # Si el task_type es corrección de texto, aplicar selección de prompt según longitud
+    if task_type == "correccion_texto":
+        # Importar el prompt completo de corrección desde donde sea necesario
+        from features.correccion_manager import SYSTEM_PROMPT_CORRECTION
+        
+        # Determinar si necesitamos usar el prompt conciso
+        original_system_message = system_message
+        if is_long_text(user_message):
+            # Si el texto es largo, usar la versión concisa
+            system_message = SYSTEM_PROMPT_CORRECTION_CONCISE
+            logger.info("Usando prompt conciso para corrección de texto largo")
+            
+            # Reemplazar el placeholder {idioma} si está presente en el mensaje del usuario
+            idioma_match = re.search(r'Idioma para explicaciones: (\w+)', user_message)
+            if idioma_match:
+                idioma = idioma_match.group(1)
+                system_message = system_message.replace("{idioma}", idioma)
+    
     # Verificar si hay thread_id
     if not thread_id:
         # Intentar obtener thread_id de session_state
@@ -381,8 +515,27 @@ def process_with_assistant(system_message, user_message, task_type="default", th
             # Verificar si ha fallado
             if status in ["failed", "cancelled", "expired"]:
                 error_message = run_status_response.get("last_error", {}).get("message", "Unknown error")
-                logger.error(f"Ejecución fallida: {status} - {error_message}")
-                return None, {"error": f"Ejecución fallida: {status} - {error_message}"}
+                
+                # Verificar específicamente si es un error de rate limiting (TPM)
+                if "tokens per min (TPM)" in error_message:
+                    logger.error(f"Error de rate limit (TPM): {error_message}")
+                    
+                    # Obtener detalles específicos del error para informar mejor
+                    requested_tokens = None
+                    limit_tokens = None
+                    
+                    # Intentar extraer los valores con regex
+                    tokens_match = re.search(r'Limit (\d+), Requested (\d+)', error_message)
+                    if tokens_match:
+                        limit_tokens = int(tokens_match.group(1))
+                        requested_tokens = int(tokens_match.group(2))
+                        logger.error(f"Límite TPM: {limit_tokens}, Solicitados: {requested_tokens}")
+                    
+                    # Lanzar excepción con información detallada para que la maneje el rate limiter
+                    raise Exception(f"Rate limit excedido: {error_message}")
+                else:
+                    logger.error(f"Ejecución fallida: {status} - {error_message}")
+                    return None, {"error": f"Ejecución fallida: {status} - {error_message}"}
             
             # Verificar si requiere acción (función)
             if status == "requires_action":
@@ -447,6 +600,11 @@ def process_with_assistant(system_message, user_message, task_type="default", th
         error_details = traceback.format_exc()
         logger.error(f"Error en process_with_assistant: {str(e)}")
         logger.debug(f"Detalles del error:\n{error_details}")
+        
+        # Verificar si es un error de rate limit y propagarlo para que lo maneje la función con rate limiting
+        if "tokens per min (TPM)" in str(e) or "rate limit" in str(e).lower():
+            raise
+        
         return None, {"error": f"Error en process_with_assistant: {str(e)}"}
 
 def get_user_profile_data(user_id):
