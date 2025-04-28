@@ -368,16 +368,16 @@ def process_with_assistant(system_message, user_message, task_type="default", th
             logger.error(f"Error obteniendo ID de asistente: {str(e)}")
             return None, {"error": f"Error obteniendo ID de asistente: {str(e)}"}
         
-        # Ejecutar asistente con el thread - CÓDIGO ACTUALIZADO
+        # Ejecutar asistente con el thread - CÓDIGO CORREGIDO
         run_response = assistants_client._api_request(
             "POST", 
             f"/threads/{thread_id}/runs", 
             data={
                 "assistant_id": assistant_id,
-                # Modificamos cómo pasamos las tools para que coincida con el formato esperado por la API v2
+                # Corregido: Cambiado 'retrieval' por 'file_search'
                 "tools": [
                     {"type": "code_interpreter"},  # Incluir code_interpreter para asegurar compatibilidad
-                    {"type": "retrieval"},         # Incluir retrieval para compatibilidad con vector store
+                    {"type": "file_search"},       # Cambiado 'retrieval' por 'file_search'
                     *[
                         {"type": "function", "function": func["function"]} 
                         for func in assistant_functions 
