@@ -12,7 +12,8 @@ import re
 import traceback
 import streamlit as st
 
-from core.openai_integration import process_with_assistant
+from core.openai_integration import process_with_assistant_with_rate_limiting, seleccionar_prompt_por_longitud
+from core.openai_integration import SYSTEM_PROMPT_CORRECTION_CONCISE
 from core.circuit_breaker import circuit_breaker
 from core.session_manager import get_user_info, get_session_var
 from config.settings import NIVELES_ESPANOL
@@ -277,6 +278,7 @@ OBLIGATORIO: Devuelve tu respuesta solo como un objeto JSON válido, sin texto a
 def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idioma="español"):
     """
     Procesa un texto con el asistente de OpenAI para obtener correcciones.
+    Versión mejorada con rate limiting y prompts adaptados a la longitud.
     
     Args:
         texto_input (str): Texto a corregir
@@ -385,7 +387,18 @@ Recuerda responder en formato json según las instrucciones.
                 "texto_original": texto_input
             }
         
-        # Procesar con el asistente
+        # Seleccionar el prompt adecuado según la longitud del texto
+        selected_prompt = seleccionar_prompt_por_longitud(
+            texto_input, 
+            SYSTEM_PROMPT_CORRECTION, 
+            SYSTEM_PROMPT_CORRECTION_CONCISE
+        )
+        
+        # Loguear para diagnóstico
+        prompt_type = "conciso" if selected_prompt == SYSTEM_PROMPT_CORRECTION_CONCISE else "completo"
+        logger.info(f"Usando prompt {prompt_type} para texto de {len(texto_input.split())} palabras")
+        
+        # Procesar con el asistente usando la nueva función con rate limiting
         try:
             # Obtener thread_id actual si existe
             thread_id = get_session_var("thread_id")
@@ -393,10 +406,9 @@ Recuerda responder en formato json según las instrucciones.
             # Loguear para debug
             logger.info(f"Enviando texto de longitud {len(texto_input)} a procesar")
             
-            # Procesar con el asistente usando la nueva interfaz
-            # MODIFICACIÓN: Pasamos el system prompt completo en vez de string vacío
-            content, data = process_with_assistant(
-                system_message=SYSTEM_PROMPT_CORRECTION,  # Pasamos el system prompt completo
+            # Procesar con el asistente usando la versión con rate limiting
+            content, data = process_with_assistant_with_rate_limiting(
+                system_message=selected_prompt,
                 user_message=user_message,
                 task_type="correccion_texto",
                 thread_id=thread_id,
@@ -406,9 +418,8 @@ Recuerda responder en formato json según las instrucciones.
             # Loguear resultado para debug
             logger.info(f"Recibida respuesta: content={type(content)}, data={type(data) if data is not None else None}")
             
-            # Verificar que el system_message ha sido aplicado correctamente
+            # Verificar si la respuesta tiene la estructura esperada según el system prompt
             if data and isinstance(data, dict):
-                # Verificar si la respuesta tiene la estructura esperada según el system prompt
                 estructura_correcta = all(
                     campo in data for campo in ["saludo", "tipo_texto", "errores", "texto_corregido", "analisis_contextual", "consejo_final"]
                 )
