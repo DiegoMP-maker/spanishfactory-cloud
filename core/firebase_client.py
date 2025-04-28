@@ -927,60 +927,39 @@ def get_user_thread(uid: str):
         logger.error(f"Error en get_user_thread: {e}")
         return None
 
-def save_user_thread(uid: str, thread_id: str, email: str = None) -> bool:
+def save_user_thread_enhanced(user_id, thread_id):
     """
-    Guarda el thread_id asociado a un usuario en Firestore.
+    Versión mejorada de save_user_thread que también registra métricas.
     
     Args:
-        uid: ID del usuario
-        thread_id: ID del thread
-        email: Email del usuario (opcional)
+        user_id (str): ID del usuario
+        thread_id (str): ID del thread
         
     Returns:
-        bool: True si se guardó correctamente, False en caso contrario
+        bool: True si se guardó correctamente
     """
     try:
-        if not uid or not thread_id:
-            logger.warning("UID o thread_id vacío en save_user_thread")
-            return False
+        # Primero guardar thread normalmente 
+        from core.firebase_client import save_user_thread
+        result = save_user_thread(user_id, thread_id)
         
-        # Inicializar Firebase
-        db, success = initialize_firebase()
+        # Si se guardó correctamente y hay thread_id (no es None)
+        if result and thread_id:
+            # Guardar métricas adicionales
+            save_thread_metrics(thread_id, user_id)
+            
+            # Si hay thread anterior, marcarlo como inactivo
+            previous_thread = st.session_state.get("previous_thread_id")
+            if previous_thread and previous_thread != thread_id:
+                mark_thread_inactive(previous_thread)
+                
+            # Actualizar referencia al thread anterior
+            st.session_state["previous_thread_id"] = thread_id
+            
+        return result
         
-        if not success or not db:
-            logger.error("No se pudo inicializar Firebase en save_user_thread")
-            return False
-        
-        # Datos a guardar
-        data = {
-            "thread_id": thread_id,
-            "thread_updated_at": time.time()
-        }
-        
-        # Si tenemos email, incluirlo para asegurar que existe
-        if email:
-            data["email"] = email
-        
-        # Actualizar documento
-        doc_ref = db.collection(FIREBASE_COLLECTION_USERS).document(uid)
-        doc = doc_ref.get()
-        
-        if doc.exists:
-            # Actualizar documento existente
-            doc_ref.update(data)
-        else:
-            # Crear documento nuevo
-            data["uid"] = uid
-            data["creado"] = time.time()
-            # Inicializar perfil completo
-            data = initialize_user_profile(data)
-            doc_ref.set(data)
-        
-        logger.info(f"Thread {thread_id} guardado para usuario {uid}")
-        return True
-    
     except Exception as e:
-        logger.error(f"Error en save_user_thread: {e}")
+        logger.error(f"Error en save_user_thread_enhanced: {e}")
         return False
 
 def save_correction(correction_data: dict) -> str:
