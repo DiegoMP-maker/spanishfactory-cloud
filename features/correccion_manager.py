@@ -20,9 +20,6 @@ from core.circuit_breaker import circuit_breaker
 from core.session_manager import get_user_info, get_session_var, set_session_var
 from features.functions_definitions import get_evaluation_criteria
 
-# Importar explícitamente ambas funciones para evitar errores
-from core.firebase_client import save_correccion
-
 logger = logging.getLogger(__name__)
 
 # System prompt completo para el asistente de corrección (importado desde correccion.py)
@@ -352,6 +349,8 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
         # Guardar resultado en Firebase si hay usuario
         if user_id:
             try:
+                from core.firebase_client import save_correccion
+                
                 # Contar errores por categoría
                 errores_conteo = {}
                 errores = data.get("errores", {})
