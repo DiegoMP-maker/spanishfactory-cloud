@@ -34,6 +34,7 @@ POLLING_API_TIMEOUT = 30       # Timeout para polling de estado
 def extract_json_safely(content):
     """
     Extrae JSON válido de una cadena de texto con manejo de errores mejorado y reparación.
+    Versión optimizada y robusta para manejar respuestas del asistente.
     
     Args:
         content (str): Contenido que puede incluir JSON
@@ -71,21 +72,38 @@ def extract_json_safely(content):
         
         # 2. Buscar bloques de código JSON con formato markdown
         import re
-        json_code_blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)```', content)
+        
+        # 2.1 Buscar bloques de código con etiqueta json explícita
+        json_code_blocks = re.findall(r'```json\s*([\s\S]*?)```', content)
         if json_code_blocks:
-            logger.info(f"Encontrados {len(json_code_blocks)} bloques de código que podrían contener JSON")
+            logger.info(f"Encontrados {len(json_code_blocks)} bloques de código JSON explícitos")
             for i, block in enumerate(json_code_blocks):
                 try:
                     result = json.loads(block.strip())
-                    logger.info(f"✅ Éxito: JSON extraído del bloque de código #{i+1}")
+                    logger.info(f"✅ Éxito: JSON extraído del bloque de código JSON explícito #{i+1}")
                     return result
                 except json.JSONDecodeError as e:
-                    logger.debug(f"Bloque #{i+1} no es JSON válido: {str(e)}")
-        else:
-            logger.debug("No se encontraron bloques de código JSON con formato markdown")
+                    logger.debug(f"Bloque JSON explícito #{i+1} no es JSON válido: {str(e)}")
+        
+        # 2.2 Buscar bloques de código genéricos que podrían contener JSON
+        generic_code_blocks = re.findall(r'```\s*([\s\S]*?)```', content)
+        if generic_code_blocks:
+            logger.info(f"Encontrados {len(generic_code_blocks)} bloques de código genéricos")
+            for i, block in enumerate(generic_code_blocks):
+                try:
+                    # Verificar si el bloque empieza con '{'
+                    if block.strip().startswith('{'):
+                        result = json.loads(block.strip())
+                        logger.info(f"✅ Éxito: JSON extraído del bloque de código genérico #{i+1}")
+                        return result
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Bloque genérico #{i+1} no es JSON válido: {str(e)}")
         
         # 3. Buscar cualquier estructura con forma de JSON en el texto
-        # Buscar desde el primer { hasta el último }
+        # Es importante encontrar el JSON completo, desde el primer { hasta el último }
+        # que forme un objeto JSON válido completo
+        
+        # 3.1 Buscar desde el primer { hasta el último }
         first_brace = content.find('{')
         last_brace = content.rfind('}')
         
@@ -99,85 +117,79 @@ def extract_json_safely(content):
                 return result
             except json.JSONDecodeError as e:
                 logger.debug(f"La estructura encontrada no es JSON válido: {str(e)}")
+        
+        # 4. Extraer todas las estructuras que parecen JSON y probar cada una
+        all_json_like = re.findall(r'({[^{]*})', content)
+        if all_json_like:
+            logger.info(f"Encontrados {len(all_json_like)} fragmentos potenciales de JSON")
+            
+            # Ordenar por longitud (preferir fragmentos más largos primero)
+            all_json_like.sort(key=len, reverse=True)
+            
+            for i, json_fragment in enumerate(all_json_like):
+                try:
+                    result = json.loads(json_fragment)
+                    logger.info(f"✅ Éxito: JSON extraído de fragmento potencial #{i+1}")
+                    return result
+                except json.JSONDecodeError:
+                    pass
+        
+        # 5. Buscar estructuras que tengan las clave esperadas para una corrección
+        expected_keys = ["errores", "texto_corregido", "saludo", "tipo_texto", "analisis_contextual", "consejo_final"]
+        
+        # Contar cuántas claves esperadas aparecen en el contenido
+        keys_present = [key for key in expected_keys if f'"{key}"' in content or f"'{key}'" in content]
+        
+        if len(keys_present) >= 3:  # Si al menos 3 claves están presentes, podría ser una corrección
+            logger.info(f"Encontradas {len(keys_present)} claves esperadas en el contenido: {', '.join(keys_present)}")
+            
+            # 5.1 Intentar una reparación agresiva
+            # Extraer el contenido entre el primer { y el último }
+            if first_brace >= 0 and last_brace > first_brace:
+                potential_json = content[first_brace:last_brace+1]
                 
-                # 4. Reparación agresiva: limpieza de caracteres y estructura
-                # 4.1 Limpieza básica
-                cleaned_json = potential_json
-                # Reemplazar caracteres problemáticos comunes
-                cleaned_json = cleaned_json.replace('\t', ' ').replace('\r', '')
-                # Normalizar saltos de línea
-                cleaned_json = cleaned_json.replace('\n', ' ')
-                # Eliminar espacios duplicados
-                cleaned_json = re.sub(r' +', ' ', cleaned_json)
-                # Arreglar comillas (por si hay comillas mal escapadas)
-                cleaned_json = re.sub(r'(?<!\\)"', '\\"', cleaned_json)
-                cleaned_json = re.sub(r'\\"(\s*)([\[{:,])', '"\1\2', cleaned_json)
-                cleaned_json = re.sub(r'([\]}:,])(\s*)\\"', '\1\2"', cleaned_json)
+                # Limpiar caracteres problemáticos
+                cleaned_json = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', potential_json)
                 
+                # Normalizar comillas
+                # Reemplazar " por " si hay un desequilibrio
+                quote_count = cleaned_json.count('"')
+                if quote_count % 2 != 0:
+                    logger.info("Detectado número impar de comillas, intentando normalizar")
+                    cleaned_json = cleaned_json.replace('"', '"')
+                
+                # Intentar parsear el JSON limpio
                 try:
                     result = json.loads(cleaned_json)
                     logger.info("✅ Éxito: JSON extraído después de limpieza extensiva")
                     return result
                 except json.JSONDecodeError:
                     logger.debug("La limpieza extensiva no fue suficiente")
-                    
-                    # 4.2 Reparación de estructura: construir JSON manualmente
-                    if '"errores"' in cleaned_json and '"texto_corregido"' in cleaned_json:
-                        logger.info("Detectada estructura de corrección, intentando reconstrucción manual")
-                        reconstructed_json = {}
-                        
-                        # Extraer campos básicos
-                        saludo_match = re.search(r'"saludo"\s*:\s*"([^"]*)"', cleaned_json)
-                        if saludo_match:
-                            reconstructed_json["saludo"] = saludo_match.group(1)
-                        
-                        tipo_match = re.search(r'"tipo_texto"\s*:\s*"([^"]*)"', cleaned_json) 
-                        if tipo_match:
-                            reconstructed_json["tipo_texto"] = tipo_match.group(1)
-                        
-                        texto_match = re.search(r'"texto_corregido"\s*:\s*"([^"]*)"', cleaned_json)
-                        if texto_match:
-                            reconstructed_json["texto_corregido"] = texto_match.group(1)
-                        
-                        consejo_match = re.search(r'"consejo_final"\s*:\s*"([^"]*)"', cleaned_json)
-                        if consejo_match:
-                            reconstructed_json["consejo_final"] = consejo_match.group(1)
-                        
-                        # Estructura básica de errores
-                        reconstructed_json["errores"] = {
-                            "Gramática": [],
-                            "Léxico": [],
-                            "Puntuación": [],
-                            "Estructura textual": []
-                        }
-                        
-                        logger.info(f"✅ JSON reconstruido manualmente con {len(reconstructed_json)} campos")
-                        return reconstructed_json
-        
-        # 5. Análisis semántico del contenido para construir estructura mínima
-        if "texto_corregido" in content or "errores" in content:
-            logger.info("Construyendo estructura JSON mínima desde contenido textual")
             
-            # Extraer texto corregido si existe
-            texto_corregido = ""
-            texto_corregido_match = re.search(r'texto_corregido["\s:]+([^"]+)"', content)
-            if texto_corregido_match:
-                texto_corregido = texto_corregido_match.group(1)
+            # 5.2 Si todo falla, crear manualmente un JSON con estructura mínima
+            logger.warning("No se pudo extraer JSON válido. Creando estructura mínima.")
             
-            # Construir estructura mínima funcional
+            # Intenta extraer el texto corregido
+            texto_corregido_match = re.search(r'"texto_corregido"\s*:\s*"([^"]*)"', content)
+            texto_corregido = texto_corregido_match.group(1) if texto_corregido_match else ""
+            
+            # Intenta extraer el consejo final
+            consejo_final_match = re.search(r'"consejo_final"\s*:\s*"([^"]*)"', content)
+            consejo_final = consejo_final_match.group(1) if consejo_final_match else ""
+            
+            # Crear estructura mínima
             minimal_json = {
-                "texto_original": "",  # Se rellenará en el código principal
-                "texto_corregido": texto_corregido if texto_corregido else content,
+                "texto_corregido": texto_corregido or content,
                 "errores": {
                     "Gramática": [],
                     "Léxico": [],
                     "Puntuación": [],
                     "Estructura textual": []
                 },
-                "consejo_final": "No fue posible extraer un consejo detallado."
+                "consejo_final": consejo_final or "No se pudo extraer el consejo final."
             }
             
-            logger.info("✅ Construida estructura JSON mínima como fallback")
+            logger.info("✅ Creada estructura JSON mínima como fallback")
             return minimal_json
         
         # Si llegamos aquí, no hay JSON válido
@@ -198,7 +210,8 @@ def extract_json_safely(content):
                 "Léxico": [],
                 "Puntuación": [],
                 "Estructura textual": []
-            }
+            },
+            "consejo_final": "Hubo un problema al procesar la respuesta. Por favor, intenta nuevamente."
         }
         
     except Exception as e:
@@ -213,7 +226,8 @@ def extract_json_safely(content):
                 "Léxico": [],
                 "Puntuación": [],
                 "Estructura textual": []
-            }
+            },
+            "consejo_final": "Ocurrió un error interno. Por favor, intenta nuevamente."
         }
 
 def guardar_metricas_modelo(modelo, tiempo_respuesta, longitud_texto, resultado_exitoso):
