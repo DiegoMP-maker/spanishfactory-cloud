@@ -654,7 +654,7 @@ def initialize_user_profile(user_data: Dict[str, Any]) -> Dict[str, Any]:
     logger.info(f"Perfil inicializado para nuevo usuario")
     return profile_data
 
-def ensure_profile_fields(uid: str) -> bool:
+def ensure_profile_fields(uid):
     """
     Asegura que el usuario tenga todos los campos del perfil expandido.
     Si algún campo falta, lo añade con valor por defecto.
@@ -666,9 +666,12 @@ def ensure_profile_fields(uid: str) -> bool:
         bool: True si se actualizó el perfil, False en caso contrario
     """
     try:
+        # Validación de entrada
         if not uid:
             logger.warning("UID vacío en ensure_profile_fields")
             return False
+        
+        logger.info(f"Verificando campos de perfil para usuario {uid}")
         
         # Inicializar Firebase
         db, success = initialize_firebase()
@@ -683,16 +686,28 @@ def ensure_profile_fields(uid: str) -> bool:
         
         if not doc.exists:
             logger.warning(f"No se encontró documento para uid: {uid}")
-            return False
+            # Intentar crear el documento con el esquema completo
+            try:
+                data = STUDENT_PROFILE_SCHEMA.copy()
+                data["uid"] = uid
+                data["creado"] = time.time()
+                
+                doc_ref.set(data)
+                logger.info(f"Creado perfil completo para usuario {uid}")
+                return True
+            except Exception as create_error:
+                logger.error(f"Error creando perfil: {create_error}")
+                return False
         
         # Obtener datos actuales
         user_data = doc.to_dict()
         
-        # Verificar si faltan campos del perfil
+        # Verificar si faltan campos del perfil o si algún campo es None
         missing_fields = {}
         for field, default_value in STUDENT_PROFILE_SCHEMA.items():
-            if field not in user_data:
+            if field not in user_data or user_data[field] is None:
                 missing_fields[field] = default_value
+                logger.info(f"Campo '{field}' faltante o None, se asignará valor por defecto")
         
         # Si hay campos faltantes, actualizarlos
         if missing_fields:
@@ -700,16 +715,19 @@ def ensure_profile_fields(uid: str) -> bool:
             doc_ref.update(missing_fields)
             return True
         
+        logger.info(f"El perfil del usuario {uid} ya tiene todos los campos necesarios")
         return False
     
     except Exception as e:
+        error_details = traceback.format_exc()
         logger.error(f"Error en ensure_profile_fields: {e}")
+        logger.debug(f"Detalles del error:\n{error_details}")
         return False
     
-def get_user_data(uid: str) -> Dict[str, Any]:
+def get_user_data(uid):
     """
-    Obtiene los datos de un usuario desde Firestore.
-    También verifica y completa campos de perfil si faltan.
+    Obtiene los datos de un usuario desde Firestore con
+    validaciones adicionales y logging detallado para diagnóstico.
     
     Args:
         uid: ID del usuario
@@ -718,9 +736,13 @@ def get_user_data(uid: str) -> Dict[str, Any]:
         dict: Datos del usuario o diccionario vacío si no se encuentra
     """
     try:
+        # Validación de entrada
         if not uid:
             logger.warning("UID vacío en get_user_data")
             return {}
+        
+        # Registro detallado para diagnóstico
+        logger.info(f"Obteniendo datos para usuario con UID: {uid}")
         
         # Inicializar Firebase
         db, success = initialize_firebase()
@@ -736,25 +758,59 @@ def get_user_data(uid: str) -> Dict[str, Any]:
         if doc.exists:
             # Convertir a diccionario
             user_data = doc.to_dict()
+            logger.info(f"Datos obtenidos correctamente para usuario {uid}")
             
-            # Asegurar que el perfil está completo
-            # Si faltan campos, actualizarlos silenciosamente
-            try:
-                if ensure_profile_fields(uid):
-                    # Si se actualizaron campos, volver a obtener los datos
-                    doc = doc_ref.get()
-                    user_data = doc.to_dict()
-            except Exception as profile_error:
-                logger.warning(f"Error completando campos de perfil: {profile_error}")
+            # Log detallado de campos críticos para diagnóstico
+            if "nivel" in user_data:
+                logger.info(f"Nivel del usuario en Firebase: {user_data['nivel']}")
+            else:
+                logger.warning(f"Campo 'nivel' no encontrado en datos del usuario {uid}")
+            
+            if "numero_correcciones" in user_data:
+                logger.info(f"Número de correcciones en Firebase: {user_data['numero_correcciones']}")
+            else:
+                logger.warning(f"Campo 'numero_correcciones' no encontrado en datos del usuario {uid}")
+            
+            # Verificar y completar campos faltantes
+            campos_faltantes = {}
+            for campo, valor_default in STUDENT_PROFILE_SCHEMA.items():
+                if campo not in user_data:
+                    campos_faltantes[campo] = valor_default
+                    logger.warning(f"Campo '{campo}' faltante, usando valor por defecto: {valor_default}")
+            
+            # Si faltan campos, actualizar silenciosamente en Firebase
+            if campos_faltantes:
+                try:
+                    logger.info(f"Actualizando {len(campos_faltantes)} campos faltantes para usuario {uid}")
+                    doc_ref.update(campos_faltantes)
+                    
+                    # Combinar los datos actuales con los campos faltantes
+                    user_data.update(campos_faltantes)
+                except Exception as update_error:
+                    logger.error(f"Error actualizando campos faltantes: {update_error}")
             
             return user_data
         else:
             logger.warning(f"No se encontró documento para uid: {uid}")
-            return {}
+            
+            # En caso de no encontrar el usuario, intentar crearlo con los valores por defecto
+            try:
+                logger.info(f"Intentando crear usuario con UID {uid} y valores por defecto")
+                data = STUDENT_PROFILE_SCHEMA.copy()
+                data["uid"] = uid
+                data["creado"] = time.time()
+                
+                doc_ref.set(data)
+                logger.info(f"Usuario {uid} creado con valores por defecto")
+                return data
+            except Exception as create_error:
+                logger.error(f"Error creando usuario: {create_error}")
+                return {}
     
     except Exception as e:
+        error_details = traceback.format_exc()
         logger.error(f"Error en get_user_data: {e}")
-        return {}
+        logger.debug(f"Detalles del error:\n{error_details}")
 
 def update_user_data(uid: str, data: Dict[str, Any]) -> bool:
     """
