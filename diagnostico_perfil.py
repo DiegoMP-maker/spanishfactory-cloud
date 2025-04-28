@@ -80,7 +80,10 @@ def diagnosticar_perfil_estudiante():
             
             # Mostrar información relevante
             with st.expander("Ver datos raw de Firebase"):
-                st.json(user_data_raw)
+                # Filtrar datos sensibles antes de mostrar
+                filtered_data = {k: v for k, v in user_data_raw.items() 
+                               if k not in ['private_key', 'token', 'key', 'password']}
+                st.json(filtered_data)
             
             # Verificar campos clave
             nivel_firebase = user_data_raw.get("nivel")
