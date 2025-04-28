@@ -16,12 +16,11 @@ import traceback
 import streamlit as st
 import os
 import requests
+import importlib
 
 # Importar dependencias del proyecto
 from config.settings import MAX_RETRIES, DEFAULT_TIMEOUT
 from core.circuit_breaker import circuit_breaker
-# Importar get_student_profile para poder usarlo en la clase
-from features.correccion import get_student_profile
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -236,6 +235,31 @@ def guardar_metricas_modelo(modelo, tiempo_respuesta, longitud_texto, resultado_
         # No es crítico si falla
         logger.warning(f"No se pudieron guardar métricas del modelo: {e}")
 
+def get_student_profile_helper(user_id):
+    """
+    Función auxiliar para obtener el perfil del estudiante.
+    Usa importación dinámica para evitar dependencias circulares.
+    
+    Args:
+        user_id: ID del usuario
+        
+    Returns:
+        dict: Perfil del estudiante o diccionario vacío si hay error
+    """
+    try:
+        # Importar dinámicamente para evitar dependencias circulares
+        correccion_module = importlib.import_module('features.correccion')
+        
+        # Comprobar si la función existe
+        if hasattr(correccion_module, 'get_student_profile'):
+            return correccion_module.get_student_profile(user_id)
+        else:
+            logger.error("No se encontró la función get_student_profile en el módulo correccion")
+            return {}
+    except Exception as e:
+        logger.error(f"Error al obtener perfil de estudiante: {e}")
+        return {}
+
 class CleanOpenAIAssistants:
     """
     Cliente limpio para OpenAI Assistants API.
@@ -449,8 +473,8 @@ class CleanOpenAIAssistants:
         # Añadir mensaje inicial con información de perfil si tenemos user_id
         if user_id:
             try:
-                # Obtener perfil del estudiante
-                profile_data = get_student_profile(user_id)
+                # Obtener perfil del estudiante usando la función auxiliar
+                profile_data = get_student_profile_helper(user_id)
                 
                 if profile_data:
                     # Crear mensaje con la información del perfil
@@ -532,8 +556,8 @@ Ten en cuenta estos datos para personalizar el feedback y la dificultad del cont
                 logger.warning(f"Thread inválido: {thread_id}")
                 return False
             
-            # Obtener perfil del estudiante
-            profile_data = get_student_profile(user_id)
+            # Obtener perfil del estudiante mediante la función auxiliar
+            profile_data = get_student_profile_helper(user_id)
             
             if not profile_data:
                 logger.warning(f"No se pudo obtener perfil para usuario {user_id}")
