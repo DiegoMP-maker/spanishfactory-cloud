@@ -11,7 +11,7 @@ import streamlit as st
 from PIL import Image
 import os
 
-from config.settings import APP_VERSION, APP_NAME
+from config.settings import APP_VERSION, APP_NAME, IS_DEV
 from core.session_manager import get_session_var, set_session_var, get_user_info
 from ui.login import mostrar_info_usuario, mostrar_logout
 from utils.file_utils import get_app_file_path
@@ -69,6 +69,17 @@ def configurar_sidebar():
                         # Usar st.rerun() para recargar la página
                         st.rerun()
                     return page_id
+            
+            # Añadir opción de diagnóstico para administradores o en modo desarrollo
+            user_info = get_user_info()
+            is_admin = user_info and user_info.get("email") in ["admin@textocorrector.ele", "tu_correo@ejemplo.com"]  # Añade aquí los correos autorizados
+            
+            if is_admin or IS_DEV:
+                st.sidebar.divider()
+                with st.sidebar.expander("🔧 Herramientas administrativas"):
+                    if st.button("🔍 Diagnóstico de Perfil"):
+                        set_session_var("current_page", "diagnostico")
+                        st.rerun()
             
             # Separador final
             st.markdown("---")
