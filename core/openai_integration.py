@@ -18,8 +18,14 @@ import re
 from core.clean_openai_assistant import get_clean_openai_assistants_client
 from core.session_manager import get_user_info, set_session_var, get_session_var
 from features.functions_definitions import get_functions_definitions, execute_function
+from core.prompts_manager import get_optimized_correction_prompt
+from core.thread_manager import limit_thread_history, should_limit_thread
 
 logger = logging.getLogger(__name__)
+
+# Constantes para gestión de threads
+MAX_THREAD_MESSAGES = 6  # Número máximo de mensajes en un thread
+THREAD_MESSAGE_THRESHOLD = 10  # Umbral a partir del cual se debe considerar limitar el thread
 
 def get_thread_for_user(user_id=None):
     """
@@ -61,6 +67,11 @@ def get_thread_for_user(user_id=None):
             if assistants_client.verify_thread(thread_id_session):
                 logger.info(f"Thread de session_state validado: {thread_id_session}")
                 
+                # Verificar si el thread necesita limpieza
+                if should_limit_thread(assistants_client, thread_id_session, THREAD_MESSAGE_THRESHOLD):
+                    logger.info(f"El thread {thread_id_session} necesita limpieza")
+                    limit_thread_history(assistants_client, thread_id_session, MAX_THREAD_MESSAGES // 2)
+                
                 # Si hay user_id, asegurarse de que el thread está guardado en Firebase
                 if user_id:
                     try:
@@ -95,6 +106,11 @@ def get_thread_for_user(user_id=None):
             # Verificar que el thread existe y es válido
             if assistants_client.verify_thread(firebase_thread_id):
                 logger.info(f"Thread de Firebase validado: {firebase_thread_id}")
+                
+                # Verificar si el thread necesita limpieza
+                if should_limit_thread(assistants_client, firebase_thread_id, THREAD_MESSAGE_THRESHOLD):
+                    logger.info(f"El thread {firebase_thread_id} necesita limpieza")
+                    limit_thread_history(assistants_client, firebase_thread_id, MAX_THREAD_MESSAGES // 2)
                 
                 # Guardar en session_state para reutilización
                 set_session_var("thread_id", firebase_thread_id)
@@ -263,8 +279,26 @@ def process_with_assistant_with_rate_limiting(system_message, user_message, task
     
     for attempt in range(max_retries):
         try:
-            # Intentar procesar normalmente
+            # Si es el tipo de tarea de corrección de texto y es primer intento, intentar con prompt ultra-conciso
+            if task_type == "correccion_texto" and attempt == 0:
+                # Obtener número aproximado de palabras
+                words_count = len(user_message.split())
+                
+                # Usar el prompt ultra-conciso
+                # Extraer el idioma del mensaje del usuario
+                idioma_match = re.search(r'Idioma para explicaciones:\s*(\w+)', user_message)
+                idioma = idioma_match.group(1) if idioma_match else "español"
+                
+                # Obtener prompt optimizado
+                optimized_prompt = get_optimized_correction_prompt(words_count, idioma)
+                logger.info(f"Usando prompt ultra-conciso para corrección de texto (intento {attempt+1})")
+                
+                # Procesar con el prompt optimizado
+                return process_with_assistant(optimized_prompt, user_message, task_type, thread_id, user_id)
+            
+            # Para otros intentos o tipos de tarea, usar el prompt normal
             return process_with_assistant(system_message, user_message, task_type, thread_id, user_id)
+        
         except Exception as e:
             error_message = str(e)
             
@@ -274,6 +308,21 @@ def process_with_assistant_with_rate_limiting(system_message, user_message, task
             
             if is_rate_limit:
                 logger.warning(f"Rate limit alcanzado (intento {attempt+1}/{max_retries})")
+                
+                # Si es primer intento y no estábamos usando prompt ultra-conciso, intentar con él
+                if attempt == 0 and task_type == "correccion_texto" and "ultra-conciso" not in str(system_message):
+                    # Extraer el idioma del mensaje del usuario
+                    idioma_match = re.search(r'Idioma para explicaciones:\s*(\w+)', user_message)
+                    idioma = idioma_match.group(1) if idioma_match else "español"
+                    
+                    # Obtener prompt ultra-conciso
+                    words_count = len(user_message.split())
+                    optimized_prompt = get_optimized_correction_prompt(words_count, idioma)
+                    
+                    logger.info("Cambiando a prompt ultra-conciso para el siguiente intento")
+                    
+                    # No esperar, intentar inmediatamente con el prompt ultra-conciso
+                    continue
                 
                 # Cálculo de backoff exponencial
                 delay = base_delay * (2 ** attempt)
@@ -293,75 +342,10 @@ def process_with_assistant_with_rate_limiting(system_message, user_message, task
                 logger.error(f"Error no relacionado con rate limit: {error_message}")
                 raise
 
-def is_long_text(texto):
-    """
-    Determina si un texto es considerado largo basado en el conteo de palabras.
-    
-    Args:
-        texto (str): Texto a analizar
-        
-    Returns:
-        bool: True si el texto es largo, False en caso contrario
-    """
-    palabras = len(texto.split())
-    return palabras > 200  # Consideramos largo si tiene más de 200 palabras
-
-# Sistema principal de selección de prompts basado en la longitud del texto
-def seleccionar_prompt_por_longitud(texto_input, system_prompt_completo, sistema_prompt_conciso=None):
-    """
-    Selecciona el prompt apropiado según la longitud del texto.
-    
-    Args:
-        texto_input (str): Texto del usuario a procesar
-        system_prompt_completo (str): Prompt completo del sistema
-        sistema_prompt_conciso (str, opcional): Versión concisa del prompt
-        
-    Returns:
-        str: El prompt seleccionado
-    """
-    # Si no se proporciona un prompt conciso, usar el completo en todos los casos
-    if not sistema_prompt_conciso:
-        return system_prompt_completo
-        
-    # Seleccionar prompt según longitud
-    if is_long_text(texto_input):
-        logger.info(f"Usando prompt conciso para texto de {len(texto_input.split())} palabras")
-        return sistema_prompt_conciso
-    else:
-        logger.info(f"Usando prompt completo para texto de {len(texto_input.split())} palabras")
-        return system_prompt_completo
-
-# Versión concisa del prompt del sistema para textos largos
-SYSTEM_PROMPT_CORRECTION_CONCISE = """🧩 Contexto: Eres un corrector ELE que debe aplicar criterios estrictos según niveles MCER.
-
-Consulta siempre el documento "base_criterios_evaluacion_niveles_mcer.md" (vs_680e701439748191be95055ca9f55531) para asegurar evaluación rigurosa.
-
-📋 Responde con estructura JSON:
-{
-  "saludo": "string",
-  "tipo_texto": "string",
-  "errores": {
-    "Gramática": [...],
-    "Léxico": [...],
-    "Puntuación": [...],
-    "Estructura textual": [...]
-  },
-  "texto_corregido": "string",
-  "analisis_contextual": {...},
-  "consejo_final": "string"
-}
-
-Los errores deben tener campos: "fragmento_erroneo", "correccion", "explicacion"
-Las explicaciones en {idioma}. El texto corregido y consejo en español.
-
-Considera el nivel MCER para determinar la gravedad de los errores. Sé crítico pero constructivo.
-IMPORTANTE: Debe ser un JSON válido sin texto adicional, estructura exacta.
-"""
-
 def process_with_assistant(system_message, user_message, task_type="default", thread_id=None, user_id=None):
     """
     Procesa un mensaje con el asistente de OpenAI usando el cliente limpio.
-    Versión mejorada con soporte para Function Calling.
+    Versión mejorada con soporte para Function Calling y limpieza de threads.
     
     Args:
         system_message (str): Mensaje del sistema (instrucciones)
@@ -373,24 +357,6 @@ def process_with_assistant(system_message, user_message, task_type="default", th
     Returns:
         tuple: (respuesta_raw, resultado_json)
     """
-    # Si el task_type es corrección de texto, aplicar selección de prompt según longitud
-    if task_type == "correccion_texto":
-        # Importar el prompt completo de corrección desde donde sea necesario
-        from features.correccion_manager import SYSTEM_PROMPT_CORRECTION
-        
-        # Determinar si necesitamos usar el prompt conciso
-        original_system_message = system_message
-        if is_long_text(user_message):
-            # Si el texto es largo, usar la versión concisa
-            system_message = SYSTEM_PROMPT_CORRECTION_CONCISE
-            logger.info("Usando prompt conciso para corrección de texto largo")
-            
-            # Reemplazar el placeholder {idioma} si está presente en el mensaje del usuario
-            idioma_match = re.search(r'Idioma para explicaciones: (\w+)', user_message)
-            if idioma_match:
-                idioma = idioma_match.group(1)
-                system_message = system_message.replace("{idioma}", idioma)
-    
     # Verificar si hay thread_id
     if not thread_id:
         # Intentar obtener thread_id de session_state
@@ -429,6 +395,11 @@ def process_with_assistant(system_message, user_message, task_type="default", th
         thread_id_valid = False
         if thread_id:
             thread_id_valid = assistants_client.verify_thread(thread_id)
+            
+            # Verificar si el thread necesita limpieza
+            if thread_id_valid and should_limit_thread(assistants_client, thread_id, THREAD_MESSAGE_THRESHOLD):
+                logger.info(f"Limitando historial del thread {thread_id}")
+                limit_thread_history(assistants_client, thread_id, MAX_THREAD_MESSAGES // 2)
         
         # Si no tenemos thread válido, crear uno nuevo
         if not thread_id_valid:
@@ -460,7 +431,7 @@ def process_with_assistant(system_message, user_message, task_type="default", th
         
         # Obtener ID de asistente
         try:
-            # Siempre pasamos el system_message completo para asegurar que se use el prompt correcto
+            # Usar el system_message proporcionado
             assistant_id = assistants_client.get_assistant_id(task_type, system_message)
             logger.info(f"ID de asistente obtenido: {assistant_id}")
         except Exception as e:
