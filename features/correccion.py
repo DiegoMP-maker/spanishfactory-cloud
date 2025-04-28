@@ -18,6 +18,9 @@ from core.session_manager import get_user_info, get_session_var
 from config.settings import NIVELES_ESPANOL
 from config.settings import IS_DEV  
 
+# Importar explícitamente ambas funciones para evitar errores
+from core.firebase_client import save_correccion, get_user_data
+
 logger = logging.getLogger(__name__)
 
 # Definición local de get_student_profile para eliminar dependencia externa
@@ -36,9 +39,6 @@ def get_student_profile(user_id):
         return {}
     
     try:
-        # Importar dinámicamente para evitar dependencias circulares
-        from core.firebase_client import get_user_data
-        
         # Obtener datos del usuario con log detallado
         logger.info(f"Obteniendo datos de usuario para UID: {user_id}")
         user_data = get_user_data(user_id)
@@ -520,27 +520,46 @@ Recuerda responder en formato json según las instrucciones.
         # Registrar corrección en Firebase si hay usuario
         if user_id:
             try:
-                from core.firebase_client import save_correccion
-                
                 # Contar errores por categoría
                 errores_conteo = {}
                 errores = json_data.get("errores", {})
                 for categoria, lista_errores in errores.items():
-                    errores_conteo[categoria] = len(lista_errores) if isinstance(lista_errores, list) else 0
+                    errores_conteo[categoria.lower()] = len(lista_errores) if isinstance(lista_errores, list) else 0
                 
-                # Guardar en Firebase
-                save_correccion(
+                # Calcular puntuación si está disponible en el análisis contextual
+                puntuacion = 0.0
+                num_puntuaciones = 0
+                
+                if "analisis_contextual" in json_data:
+                    analisis = json_data["analisis_contextual"]
+                    for seccion in ["coherencia", "cohesion", "registro_linguistico", "adecuacion_cultural"]:
+                        if seccion in analisis and "puntuacion" in analisis[seccion]:
+                            try:
+                                puntuacion += float(analisis[seccion]["puntuacion"])
+                                num_puntuaciones += 1
+                            except (ValueError, TypeError):
+                                pass
+                
+                # Calcular promedio
+                if num_puntuaciones > 0:
+                    puntuacion = round(puntuacion / num_puntuaciones, 1)
+                else:
+                    puntuacion = 5.0  # Valor por defecto
+                
+                # Guardar en Firebase usando la función importada
+                resultado = save_correccion(
                     user_id=user_id,
                     texto_original=texto_input,
                     texto_corregido=json_data.get("texto_corregido", ""),
                     nivel=nivel,
                     errores=errores_conteo,
-                    puntuacion=json_data.get("puntuacion", 8.0)  # Usar valor del json o valor por defecto
+                    puntuacion=puntuacion
                 )
                 
-                logger.info(f"Corrección guardada para usuario {user_id}")
+                logger.info(f"Corrección guardada para usuario {user_id}: {resultado}")
             except Exception as firebase_error:
                 logger.error(f"Error guardando corrección en Firebase: {str(firebase_error)}")
+                logger.error(traceback.format_exc())
         
         # Éxito - devolver los datos procesados
         logger.info("Procesamiento completado con éxito")
