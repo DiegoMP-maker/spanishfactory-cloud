@@ -1606,3 +1606,128 @@ def get_error_statistics(user_id):
             "total_correcciones": 0,
             "areas_problematicas": []
         }
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Implementación de la función save_correction_with_stats
+Debe ubicarse al final del archivo core/firebase_client.py
+"""
+
+def save_correction_with_stats(user_id, texto_original, texto_corregido, nivel, errores, puntuacion=None):
+    """
+    Guarda una corrección de texto en Firestore y actualiza las estadísticas de usuario.
+    Implementación transaccional para garantizar consistencia de datos.
+    
+    Args:
+        user_id (str): ID del usuario
+        texto_original (str): Texto original sin corregir
+        texto_corregido (str): Texto ya corregido
+        nivel (str): Nivel de español del estudiante (A1-C2)
+        errores (dict): Diccionario con conteo de errores por categoría
+        puntuacion (float, opcional): Puntuación asignada a la corrección
+        
+    Returns:
+        str: ID del documento creado o None si hubo error
+    """
+    try:
+        # Validar parámetros obligatorios
+        if not user_id or not isinstance(texto_original, str) or not isinstance(texto_corregido, str):
+            logger.warning("Parámetros incorrectos en save_correction_with_stats")
+            return None
+        
+        # Normalizar nombres de categorías (asegurar minúsculas)
+        errores_norm = {}
+        for categoria, cantidad in errores.items():
+            # Convertir a minúsculas y normalizar tildes
+            cat_norm = categoria.lower().strip()
+            cat_norm = cat_norm.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u')
+            errores_norm[cat_norm] = cantidad
+        
+        # Inicializar Firebase
+        db, success = initialize_firebase()
+        
+        if not success or not db:
+            logger.error("No se pudo inicializar Firebase en save_correction_with_stats")
+            return None
+        
+        # Datos de la corrección
+        correction_data = {
+            "uid": user_id,
+            "texto_original": texto_original,
+            "texto_corregido": texto_corregido,
+            "nivel": nivel,
+            "errores": errores_norm,
+            "puntuacion": puntuacion if puntuacion is not None else 0.0,
+            "fecha": time.time()
+        }
+        
+        # Ejecutar en transacción para garantizar atomicidad
+        @firestore.transactional
+        def update_in_transaction(transaction, user_ref, correction_data):
+            # Obtener datos actuales del usuario
+            user_snapshot = user_ref.get(transaction=transaction)
+            
+            if not user_snapshot.exists:
+                # Si el usuario no existe, crearlo con campos por defecto
+                logger.warning(f"Usuario {user_id} no existe, creando perfil")
+                user_data = initialize_user_profile({"uid": user_id})
+                transaction.set(user_ref, user_data)
+            else:
+                user_data = user_snapshot.to_dict()
+            
+            # Actualizar estadísticas de errores
+            if "errores_por_tipo" not in user_data:
+                user_data["errores_por_tipo"] = {}
+            
+            # Sumar los nuevos errores a los existentes
+            for categoria, cantidad in errores_norm.items():
+                if categoria in user_data["errores_por_tipo"]:
+                    user_data["errores_por_tipo"][categoria] += cantidad
+                else:
+                    user_data["errores_por_tipo"][categoria] = cantidad
+            
+            # Incrementar contador de correcciones
+            if "numero_correcciones" not in user_data:
+                user_data["numero_correcciones"] = 1
+            else:
+                user_data["numero_correcciones"] += 1
+            
+            # Actualizar timestamp de última corrección
+            user_data["ultima_correccion"] = time.time()
+            
+            # Actualizar nivel si es distinto
+            if "nivel" in user_data and user_data["nivel"] != nivel:
+                user_data["nivel_anterior"] = user_data["nivel"]
+                user_data["nivel"] = nivel
+            elif "nivel" not in user_data:
+                user_data["nivel"] = nivel
+            
+            # Actualizar datos del usuario
+            transaction.update(user_ref, {
+                "errores_por_tipo": user_data["errores_por_tipo"],
+                "numero_correcciones": user_data["numero_correcciones"],
+                "ultima_correccion": user_data["ultima_correccion"],
+                "nivel": user_data["nivel"]
+            })
+            
+            # Crear documento de corrección
+            correction_ref = user_ref.collection(FIREBASE_COLLECTION_CORRECTIONS).document()
+            transaction.set(correction_ref, correction_data)
+            
+            return correction_ref.id
+        
+        # Obtener referencia al documento del usuario
+        user_ref = db.collection(FIREBASE_COLLECTION_USERS).document(user_id)
+        
+        # Ejecutar transacción
+        transaction = db.transaction()
+        correction_id = update_in_transaction(transaction, user_ref, correction_data)
+        
+        logger.info(f"Corrección guardada con éxito para usuario {user_id}, ID: {correction_id}")
+        return correction_id
+        
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error en save_correction_with_stats: {str(e)}")
+        logger.debug(f"Detalles del error:\n{error_details}")
+        return None
