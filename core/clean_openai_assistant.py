@@ -767,41 +767,42 @@ Por favor, adapta tus respuestas según este perfil actualizado.
         raise Exception("No se pudo crear o encontrar un asistente válido")
     
     def get_completion(self, system_message, user_message, 
-                     max_retries=MAX_RETRIES, task_type="default", 
-                     thread_id=None, user_id=None):
-        """
-        Obtiene una respuesta usando OpenAI Assistants con soporte para thread persistente.
+                 max_retries=MAX_RETRIES, task_type="default", 
+                 thread_id=None, user_id=None):
+    """
+    Obtiene una respuesta usando OpenAI Assistants con soporte para thread persistente.
+    Versión mejorada para forzar formato JSON en las respuestas.
+    
+    Args:
+        system_message: Mensaje del sistema (instrucciones)
+        user_message: Mensaje del usuario (contenido)
+        max_retries: Número máximo de reintentos
+        task_type: Tipo de tarea para seleccionar el asistente adecuado
+        thread_id: ID de un thread existente para continuar la conversación
+        user_id: ID del usuario para incluir información de perfil (opcional)
+    
+    Returns:
+        tuple: (respuesta_raw, resultado_json)
+    """
+    # Verificar precondiciones
+    if not self.api_key:
+        return None, {"error": "API de OpenAI no configurada"}
         
-        Args:
-            system_message: Mensaje del sistema (instrucciones)
-            user_message: Mensaje del usuario (contenido)
-            max_retries: Número máximo de reintentos
-            task_type: Tipo de tarea para seleccionar el asistente adecuado
-            thread_id: ID de un thread existente para continuar la conversación
-            user_id: ID del usuario para incluir información de perfil (opcional)
+    if not circuit_breaker.can_execute("openai"):
+        return None, {"error": "Servicio OpenAI temporalmente no disponible"}
+    
+    # Para task_type "correccion_texto", asegurarse de incluir recordatorio JSON en el mensaje
+    if task_type == "correccion_texto":
+        # Verificar si ya hay referencia a JSON en los mensajes
+        has_json_keyword = "json" in system_message.lower() or "json" in user_message.lower()
         
-        Returns:
-            tuple: (respuesta_raw, resultado_json)
-        """
-        # Verificar precondiciones
-        if not self.api_key:
-            return None, {"error": "API de OpenAI no configurada"}
-            
-        if not circuit_breaker.can_execute("openai"):
-            return None, {"error": "Servicio OpenAI temporalmente no disponible"}
-        
-        # Para task_type "correccion_texto", asegurarse de incluir recordatorio JSON en el mensaje
-        if task_type == "correccion_texto":
-            # Verificar si ya hay referencia a JSON en los mensajes
-            has_json_keyword = "json" in system_message.lower() or "json" in user_message.lower()
-            
-            if not has_json_keyword:
-                logger.warning("⚠️ Ni el system_message ni el user_message contienen la palabra 'json'")
-                # Añadir una referencia explícita a JSON y estructura en el mensaje del usuario
-                json_reminder = """
-                
-RECORDATORIO IMPORTANTE:
-Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura:
+        if not has_json_keyword:
+            logger.warning("⚠️ Ni el system_message ni el user_message contienen la palabra 'json'")
+            # Añadir una referencia explícita a JSON y estructura en el mensaje del usuario
+            json_reminder = """
+
+RECORDATORIO CRÍTICO:
+Debes responder ÚNICAMENTE con un objeto JSON válido, siguiendo exactamente esta estructura:
 {
   "saludo": "...",
   "tipo_texto": "...",
@@ -821,343 +822,41 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
   "consejo_final": "...",
   "fin": "Fin de texto corregido."
 }
-                """
-                user_message += json_reminder
-                logger.info("✅ Añadido recordatorio detallado de estructura JSON al mensaje del usuario")
-        # Para otros tipos de tareas, mantener comportamiento original
-        else:
-            # Verificar si system_message o user_message contienen la palabra "json"
-            has_json_keyword = "json" in system_message.lower() or "json" in user_message.lower()
-            if not has_json_keyword:
-                logger.warning("Ni el mensaje del sistema ni el mensaje del usuario contienen la palabra 'json'")
-                # Añadir una referencia a JSON en el mensaje del usuario si es necesario
-                if task_type in ["generacion_ejercicios", "plan_estudio"]:
-                    user_message += "\n\nPor favor, proporciona tu respuesta en formato json."
-                    logger.info("Añadida referencia a JSON en el mensaje del usuario")
-        
-        # Iniciar métricas
-        tiempo_inicio = time.time()
-        longitud_estimada = len(user_message.split())
-        
-        # Verificar thread existente
-        thread_id_is_valid = False
-        if thread_id:
-            thread_id_is_valid = self.verify_thread(thread_id)
-        
+
+Tu respuesta DEBE comenzar con '{' y terminar con '}' sin ningún texto fuera del objeto JSON.
+"""
+            user_message += json_reminder
+            logger.info("✅ Añadido recordatorio detallado de estructura JSON al mensaje del usuario")
+    # Para otros tipos de tareas, mantener comportamiento original
+    else:
+        # Verificar si system_message o user_message contienen la palabra "json"
+        has_json_keyword = "json" in system_message.lower() or "json" in user_message.lower()
+        if not has_json_keyword:
+            logger.warning("Ni el mensaje del sistema ni el mensaje del usuario contienen la palabra 'json'")
+            # Añadir una referencia a JSON en el mensaje del usuario si es necesario
+            if task_type in ["generacion_ejercicios", "plan_estudio"]:
+                user_message += "\n\nPor favor, proporciona tu respuesta en formato json."
+                logger.info("Añadida referencia a JSON en el mensaje del usuario")
+    
+    # Iniciar métricas
+    tiempo_inicio = time.time()
+    longitud_estimada = len(user_message.split())
+    
+    # Verificar thread existente
+    thread_id_is_valid = False
+    if thread_id:
+        thread_id_is_valid = self.verify_thread(thread_id)
+    
+    try:
+        # Obtener ID del asistente apropiado
         try:
-            # Obtener ID del asistente apropiado
-            try:
-                # CAMBIO AQUÍ: Si system_message está vacío, pasamos un string vacío para no modificar 
-                # el prompt configurado en el asistente
-                assistant_instruction = system_message if system_message else ""
-                assistant_id = self.get_assistant_id(task_type, assistant_instruction)
-            except Exception as e:
-                logger.error(f"Error al obtener ID de asistente: {e}")
-                return None, {
-                    "error": f"Error al obtener ID de asistente: {str(e)}",
-                    "texto_corregido": "Error interno al configurar el servicio de corrección.",
-                    "errores": {
-                        "Gramática": [],
-                        "Léxico": [],
-                        "Puntuación": [],
-                        "Estructura textual": []
-                    }
-                }
-            
-            # Crear o usar thread existente
-            if not thread_id_is_valid:
-                # Crear nuevo thread con perfil de usuario si está disponible
-                thread_response = self.create_thread(user_id=user_id)
-                if not thread_response or "id" not in thread_response:
-                    return None, {
-                        "error": "No se pudo crear thread",
-                        "texto_corregido": "No se pudo iniciar la sesión de corrección.",
-                        "errores": {
-                            "Gramática": [],
-                            "Léxico": [],
-                            "Puntuación": [],
-                            "Estructura textual": []
-                        }
-                    }
-                thread_id = thread_response["id"]
-                logger.info(f"Creado nuevo thread: {thread_id}")
-            else:
-                logger.info(f"Usando thread existente: {thread_id}")
-                
-                # Si tenemos user_id y thread existente, verificar si necesitamos actualizar el perfil
-                # Esta lógica podría optimizarse con un control de "última actualización de perfil"
-                if user_id:
-                    # Cada 10 interacciones o según necesidad, actualizar el perfil
-                    thread_messages = self.list_messages(thread_id)
-                    
-                    # Verificar si la respuesta contiene error de timeout
-                    if isinstance(thread_messages, dict) and "error_type" in thread_messages and thread_messages["error_type"] == "timeout":
-                        logger.warning(f"Timeout al obtener mensajes del thread: {thread_messages.get('error', 'Timeout')}")
-                        return None, {
-                            "error": "Timeout al obtener mensajes del thread",
-                            "texto_corregido": "El servicio de corrección está tardando demasiado en responder. Por favor, inténtelo de nuevo más tarde.",
-                            "errores": {
-                                "Gramática": [],
-                                "Léxico": [],
-                                "Puntuación": [],
-                                "Estructura textual": []
-                            }
-                        }
-                    
-                    if thread_messages and "data" in thread_messages:
-                        message_count = len(thread_messages["data"])
-                        if message_count % 10 == 0:  # Actualizar cada 10 mensajes
-                            try:
-                                self.update_thread_with_profile(thread_id, user_id)
-                            except Exception as profile_error:
-                                logger.warning(f"Error actualizando perfil en thread: {str(profile_error)}")
-            
-            # Añadir mensaje al thread
-            message_response = self.add_message_to_thread(thread_id, user_message)
-            
-            # Verificar si la respuesta contiene error de timeout
-            if isinstance(message_response, dict) and "error_type" in message_response and message_response["error_type"] == "timeout":
-                logger.warning(f"Timeout al añadir mensaje al thread: {message_response.get('error', 'Timeout')}")
-                return None, {
-                    "error": "Timeout al añadir mensaje al thread",
-                    "texto_corregido": "El servicio de corrección está tardando demasiado en responder. Por favor, inténtelo de nuevo más tarde.",
-                    "errores": {
-                        "Gramática": [],
-                        "Léxico": [],
-                        "Puntuación": [],
-                        "Estructura textual": []
-                    }
-                }
-            
-            if not message_response or (isinstance(message_response, dict) and "id" not in message_response):
-                return None, {
-                    "error": "Error al añadir mensaje al thread",
-                    "texto_corregido": "No se pudo enviar el texto para su corrección.",
-                    "errores": {
-                        "Gramática": [],
-                        "Léxico": [],
-                        "Puntuación": [],
-                        "Estructura textual": []
-                    }
-                }
-            
-            # Ejecutar asistente con reintentos
-            for attempt in range(max_retries):
-                try:
-                    # Iniciar ejecución
-                    run_response = self.run_assistant(thread_id, assistant_id)
-                    
-                    # Verificar si la respuesta contiene error de timeout
-                    if isinstance(run_response, dict) and "error_type" in run_response and run_response["error_type"] == "timeout":
-                        logger.warning(f"Timeout al iniciar ejecución del asistente: {run_response.get('error', 'Timeout')}")
-                        raise TimeoutError(f"Timeout al iniciar ejecución: {run_response.get('error', 'Timeout')}")
-                    
-                    if not run_response or "id" not in run_response:
-                        raise Exception("Error al iniciar ejecución del asistente")
-                    
-                    run_id = run_response["id"]
-                    
-                    # Esperar a que la ejecución se complete (con timeout)
-                    max_wait_time = DEFAULT_TIMEOUT
-                    start_time = time.time()
-                    polling_interval = 1
-                    max_polling_interval = 5
-                    polling_count = 0
-                    
-                    # Bucle de polling para esperar que termine la ejecución
-                    while True:
-                        # Verificar timeout
-                        if time.time() - start_time > max_wait_time:
-                            raise TimeoutError(f"Timeout esperando respuesta después de {max_wait_time}s")
-                        
-                        # Consultar estado de la ejecución
-                        run_status_response = self.get_run(thread_id, run_id)
-                        
-                        # Verificar si la respuesta contiene error de timeout
-                        if isinstance(run_status_response, dict) and "error_type" in run_status_response and run_status_response["error_type"] == "timeout":
-                            logger.warning(f"Timeout al obtener estado de ejecución: {run_status_response.get('error', 'Timeout')}")
-                            raise TimeoutError(f"Timeout al obtener estado: {run_status_response.get('error', 'Timeout')}")
-                        
-                        if not run_status_response or "status" not in run_status_response:
-                            raise Exception("Error al obtener estado de la ejecución")
-                        
-                        status = run_status_response["status"]
-                        polling_count += 1
-                        logger.info(f"Estado de ejecución ({polling_count}): {status}")
-                        
-                        # Verificar si ha terminado
-                        if status == "completed":
-                            logger.info(f"Ejecución completada después de {polling_count} consultas")
-                            break
-                            
-                        # Verificar si ha fallado
-                        if status in ["failed", "cancelled", "expired"]:
-                            error_detail = run_status_response.get("last_error", {})
-                            error_message = error_detail.get("message", "Unknown error")
-                            raise Exception(f"Ejecución fallida con estado {status}: {error_message}")
-                        
-                        # Verificar si requiere acción
-                        if status == "requires_action":
-                            raise Exception("El asistente requiere una acción que esta implementación no soporta")
-                        
-                        # Ajustar intervalo de polling
-                        if polling_count > 30:
-                            logger.warning(f"Demasiadas consultas de estado ({polling_count})")
-                            polling_interval = max_polling_interval
-                        else:
-                            polling_interval = min(polling_interval * 1.5, max_polling_interval)
-                            
-                        logger.info(f"Esperando {polling_interval:.1f}s antes de verificar estado nuevamente")
-                        time.sleep(polling_interval)
-                    
-                    # Obtener mensajes
-                    messages_response = self.list_messages(thread_id)
-                    
-                    # Verificar si la respuesta contiene error de timeout
-                    if isinstance(messages_response, dict) and "error_type" in messages_response and messages_response["error_type"] == "timeout":
-                        logger.warning(f"Timeout al obtener mensajes del thread: {messages_response.get('error', 'Timeout')}")
-                        raise TimeoutError(f"Timeout al obtener mensajes: {messages_response.get('error', 'Timeout')}")
-                    
-                    if not messages_response or "data" not in messages_response:
-                        raise Exception("Error al obtener mensajes del thread")
-                    
-                    # Buscar la respuesta del asistente (primer mensaje en la lista)
-                    assistant_message_found = False
-                    for message in messages_response["data"]:
-                        if message["role"] == "assistant":
-                            assistant_message_found = True
-                            # Extraer contenido
-                            content_text = ""
-                            for content_item in message.get("content", []):
-                                if content_item["type"] == "text":
-                                    content_text += content_item["text"]["value"]
-                            
-                            # Extraer JSON
-                            data_json = extract_json_safely(content_text)
-                            
-                            # Añadir thread_id
-                            if isinstance(data_json, dict):
-                                data_json["thread_id"] = thread_id
-                            
-                            # Añadir texto original si no está incluido
-                            if isinstance(data_json, dict) and "texto_original" not in data_json:
-                                # Extraer texto original del mensaje del usuario
-                                # (podríamos tener que buscar el mensaje del usuario en la lista)
-                                for user_msg in messages_response["data"]:
-                                    if user_msg["role"] == "user":
-                                        user_text = ""
-                                        for content_item in user_msg.get("content", []):
-                                            if content_item["type"] == "text":
-                                                user_text += content_item["text"]["value"]
-                                        # Limpiar el mensaje del usuario para extraer solo el texto original
-                                        # (esto es una simplificación, podría requerir lógica más compleja)
-                                        # Por ahora, simplemente lo agregamos completo
-                                        data_json["texto_original"] = user_text
-                                        break
-                            
-                            # Asegurar que hay una estructura mínima
-                            if isinstance(data_json, dict):
-                                if "errores" not in data_json:
-                                    data_json["errores"] = {
-                                        "Gramática": [],
-                                        "Léxico": [],
-                                        "Puntuación": [],
-                                        "Estructura textual": []
-                                    }
-                                if "texto_corregido" not in data_json:
-                                    data_json["texto_corregido"] = content_text
-                            
-                            # Guardar métricas
-                            tiempo_total = time.time() - tiempo_inicio
-                            guardar_metricas_modelo(
-                                modelo=self.current_model,
-                                tiempo_respuesta=tiempo_total,
-                                longitud_texto=longitud_estimada,
-                                resultado_exitoso="error" not in data_json
-                            )
-                            
-                            # Registrar éxito
-                            circuit_breaker.record_success("openai")
-                            
-                            logger.info(f"Solicitud completada en {tiempo_total:.2f}s")
-                            return content_text, data_json
-                    
-                    # Si no se encontró respuesta del asistente
-                    if not assistant_message_found:
-                        raise Exception("No se encontró respuesta del asistente en los mensajes")
-                    
-                except TimeoutError as e:
-                    logger.warning(f"Timeout en intento {attempt+1}/{max_retries}: {e}")
-                    
-                    if attempt == max_retries - 1:
-                        # Si es el último intento, registrar fallo
-                        circuit_breaker.record_failure("openai", error_type="timeout")
-                        tiempo_total = time.time() - tiempo_inicio
-                        guardar_metricas_modelo(
-                            modelo=self.current_model,
-                            tiempo_respuesta=tiempo_total,
-                            longitud_texto=longitud_estimada,
-                            resultado_exitoso=False
-                        )
-                        return None, {
-                            "error": f"Timeout después de {max_retries} intentos",
-                            "texto_corregido": "Lo siento, el servicio de corrección está tardando demasiado en responder. Por favor, intenta nuevamente en unos momentos.",
-                            "errores": {
-                                "Gramática": [],
-                                "Léxico": [],
-                                "Puntuación": [],
-                                "Estructura textual": []
-                            }
-                        }
-                    
-                    # Esperar antes de reintentar
-                    wait_time = min(60, 4 ** attempt)
-                    logger.info(f"Esperando {wait_time}s antes de reintentar")
-                    time.sleep(wait_time)
-                    
-                except Exception as e:
-                    logger.warning(f"Error en intento {attempt+1}/{max_retries}: {e}")
-                    
-                    if attempt == max_retries - 1:
-                        # Si es el último intento, registrar fallo
-                        circuit_breaker.record_failure("openai", error_type="general")
-                        tiempo_total = time.time() - tiempo_inicio
-                        guardar_metricas_modelo(
-                            modelo=self.current_model,
-                            tiempo_respuesta=tiempo_total,
-                            longitud_texto=longitud_estimada,
-                            resultado_exitoso=False
-                        )
-                        return None, {
-                            "error": f"Error: {str(e)}",
-                            "texto_corregido": "Lo siento, ha ocurrido un error al procesar tu texto. Por favor, intenta nuevamente.",
-                            "errores": {
-                                "Gramática": [],
-                                "Léxico": [],
-                                "Puntuación": [],
-                                "Estructura textual": []
-                            }
-                        }
-                    
-                    # Esperar antes de reintentar
-                    wait_time = min(60, 2 ** attempt)
-                    logger.info(f"Esperando {wait_time}s antes de reintentar")
-                    time.sleep(wait_time)
-        
+            assistant_instruction = system_message if system_message else ""
+            assistant_id = self.get_assistant_id(task_type, assistant_instruction)
         except Exception as e:
-            # Error general
-            logger.error(f"Error general: {e}")
-            circuit_breaker.record_failure("openai", error_type="general")
-            tiempo_total = time.time() - tiempo_inicio
-            guardar_metricas_modelo(
-                modelo=self.current_model if hasattr(self, 'current_model') else "desconocido",
-                tiempo_respuesta=tiempo_total,
-                longitud_texto=longitud_estimada,
-                resultado_exitoso=False
-            )
+            logger.error(f"Error al obtener ID de asistente: {e}")
             return None, {
-                "error": f"Error general: {str(e)}",
-                "texto_corregido": "Lo siento, ha ocurrido un error inesperado. Por favor, intenta nuevamente más tarde.",
+                "error": f"Error al obtener ID de asistente: {str(e)}",
+                "texto_corregido": "Error interno al configurar el servicio de corrección.",
                 "errores": {
                     "Gramática": [],
                     "Léxico": [],
@@ -1165,6 +864,343 @@ Debes responder usando EXCLUSIVAMENTE un objeto JSON válido con esta estructura
                     "Estructura textual": []
                 }
             }
+        
+        # Crear o usar thread existente
+        if not thread_id_is_valid:
+            # Crear nuevo thread con perfil de usuario si está disponible
+            thread_response = self.create_thread(user_id=user_id)
+            if not thread_response or "id" not in thread_response:
+                return None, {
+                    "error": "No se pudo crear thread",
+                    "texto_corregido": "No se pudo iniciar la sesión de corrección.",
+                    "errores": {
+                        "Gramática": [],
+                        "Léxico": [],
+                        "Puntuación": [],
+                        "Estructura textual": []
+                    }
+                }
+            thread_id = thread_response["id"]
+            logger.info(f"Creado nuevo thread: {thread_id}")
+        else:
+            logger.info(f"Usando thread existente: {thread_id}")
+            
+            # Si tenemos user_id y thread existente, verificar si necesitamos actualizar el perfil
+            if user_id:
+                # Cada 10 interacciones o según necesidad, actualizar el perfil
+                thread_messages = self.list_messages(thread_id)
+                
+                # Verificar si la respuesta contiene error de timeout
+                if isinstance(thread_messages, dict) and "error_type" in thread_messages and thread_messages["error_type"] == "timeout":
+                    logger.warning(f"Timeout al obtener mensajes del thread: {thread_messages.get('error', 'Timeout')}")
+                    return None, {
+                        "error": "Timeout al obtener mensajes del thread",
+                        "texto_corregido": "El servicio de corrección está tardando demasiado en responder. Por favor, inténtelo de nuevo más tarde.",
+                        "errores": {
+                            "Gramática": [],
+                            "Léxico": [],
+                            "Puntuación": [],
+                            "Estructura textual": []
+                        }
+                    }
+                
+                if thread_messages and "data" in thread_messages:
+                    message_count = len(thread_messages["data"])
+                    if message_count % 10 == 0:  # Actualizar cada 10 mensajes
+                        try:
+                            self.update_thread_with_profile(thread_id, user_id)
+                        except Exception as profile_error:
+                            logger.warning(f"Error actualizando perfil en thread: {str(profile_error)}")
+        
+        # Añadir mensaje al thread
+        message_response = self.add_message_to_thread(thread_id, user_message)
+        
+        # Verificar si la respuesta contiene error de timeout
+        if isinstance(message_response, dict) and "error_type" in message_response and message_response["error_type"] == "timeout":
+            logger.warning(f"Timeout al añadir mensaje al thread: {message_response.get('error', 'Timeout')}")
+            return None, {
+                "error": "Timeout al añadir mensaje al thread",
+                "texto_corregido": "El servicio de corrección está tardando demasiado en responder. Por favor, inténtelo de nuevo más tarde.",
+                "errores": {
+                    "Gramática": [],
+                    "Léxico": [],
+                    "Puntuación": [],
+                    "Estructura textual": []
+                }
+            }
+        
+        if not message_response or (isinstance(message_response, dict) and "id" not in message_response):
+            return None, {
+                "error": "Error al añadir mensaje al thread",
+                "texto_corregido": "No se pudo enviar el texto para su corrección.",
+                "errores": {
+                    "Gramática": [],
+                    "Léxico": [],
+                    "Puntuación": [],
+                    "Estructura textual": []
+                }
+            }
+        
+        # Obtener funciones disponibles para el asistente
+        from features.functions_definitions import get_functions_definitions
+        assistant_functions = get_functions_definitions()
+        
+        # Ejecutar asistente con reintentos
+        for attempt in range(max_retries):
+            try:
+                # Iniciar ejecución con función calling
+                run_response = self._api_request(
+                    "POST", 
+                    f"/threads/{thread_id}/runs", 
+                    data={
+                        "assistant_id": assistant_id,
+                        "tools": assistant_functions  # Añadir funciones disponibles
+                    }
+                )
+                
+                # Verificar si la respuesta contiene error de timeout
+                if isinstance(run_response, dict) and "error_type" in run_response and run_response["error_type"] == "timeout":
+                    logger.warning(f"Timeout al iniciar ejecución del asistente: {run_response.get('error', 'Timeout')}")
+                    raise TimeoutError(f"Timeout al iniciar ejecución: {run_response.get('error', 'Timeout')}")
+                
+                if not run_response or "id" not in run_response:
+                    raise Exception("Error al iniciar ejecución del asistente")
+                
+                run_id = run_response["id"]
+                
+                # Esperar a que la ejecución se complete (con manejo de funciones)
+                max_wait_time = DEFAULT_TIMEOUT
+                start_time = time.time()
+                polling_interval = 1
+                max_polling_interval = 5
+                polling_count = 0
+                
+                # Bucle de polling para esperar que termine la ejecución
+                while True:
+                    # Verificar timeout
+                    if time.time() - start_time > max_wait_time:
+                        raise TimeoutError(f"Timeout esperando respuesta después de {max_wait_time}s")
+                    
+                    # Consultar estado de la ejecución
+                    run_status_response = self.get_run(thread_id, run_id)
+                    
+                    # Verificar si la respuesta contiene error de timeout
+                    if isinstance(run_status_response, dict) and "error_type" in run_status_response and run_status_response["error_type"] == "timeout":
+                        logger.warning(f"Timeout al obtener estado de ejecución: {run_status_response.get('error', 'Timeout')}")
+                        raise TimeoutError(f"Timeout al obtener estado: {run_status_response.get('error', 'Timeout')}")
+                    
+                    if not run_status_response or "status" not in run_status_response:
+                        raise Exception("Error al obtener estado de la ejecución")
+                    
+                    status = run_status_response["status"]
+                    polling_count += 1
+                    logger.info(f"Estado de ejecución ({polling_count}): {status} (tiempo transcurrido: {time.time() - start_time:.1f}s)")
+                    
+                    # Verificar si ha terminado
+                    if status == "completed":
+                        logger.info(f"Ejecución completada después de {polling_count} consultas")
+                        break
+                        
+                    # Verificar si ha fallado
+                    if status in ["failed", "cancelled", "expired"]:
+                        error_detail = run_status_response.get("last_error", {})
+                        error_message = error_detail.get("message", "Unknown error")
+                        raise Exception(f"Ejecución fallida con estado {status}: {error_message}")
+                    
+                    # Verificar si requiere acción (función)
+                    if status == "requires_action":
+                        logger.info("La ejecución requiere acción (function calling)")
+                        
+                        # Procesar llamadas a funciones
+                        # Importar la función mejorada
+                        from core.openai_integration import process_function_calls
+                        function_success = process_function_calls(assistant_id, thread_id, run_id, self)
+                        
+                        if not function_success:
+                            logger.error("Error procesando llamadas a funciones")
+                            return None, {"error": "Error procesando llamadas a funciones"}
+                        
+                        # Continuar con el siguiente ciclo (no dormir)
+                        continue
+                    
+                    # Esperar antes de verificar estado de nuevo
+                    time.sleep(polling_interval)
+                    
+                    # Ajustar intervalo de polling
+                    polling_interval = min(polling_interval * 1.5, max_polling_interval)
+                
+                # Obtener mensajes
+                messages_response = self.list_messages(thread_id)
+                
+                # Verificar si la respuesta contiene error de timeout
+                if isinstance(messages_response, dict) and "error_type" in messages_response and messages_response["error_type"] == "timeout":
+                    logger.warning(f"Timeout al obtener mensajes del thread: {messages_response.get('error', 'Timeout')}")
+                    raise TimeoutError(f"Timeout al obtener mensajes: {messages_response.get('error', 'Timeout')}")
+                
+                if not messages_response or "data" not in messages_response:
+                    raise Exception("Error al obtener mensajes del thread")
+                
+                # Buscar el mensaje más reciente del asistente
+                assistant_message = None
+                for message in messages_response["data"]:
+                    if message["role"] == "assistant":
+                        assistant_message = message
+                        break
+                
+                if not assistant_message:
+                    logger.error("No se encontró respuesta del asistente")
+                    return None, {"error": "No se encontró respuesta del asistente"}
+                
+                # Extraer contenido del mensaje
+                content_text = ""
+                for content_item in assistant_message.get("content", []):
+                    if content_item["type"] == "text":
+                        content_text += content_item["text"]["value"]
+                
+                # Log para debug
+                if content_text:
+                    preview = content_text[:100].replace('\n', ' ') + "..." if len(content_text) > 100 else content_text
+                    logger.info(f"Respuesta recibida: {preview}")
+                else:
+                    logger.warning("Contenido de respuesta vacío")
+                
+                # Verificar si la respuesta contiene JSON
+                has_json = "{" in content_text and "}" in content_text
+                if not has_json:
+                    logger.warning("La respuesta no parece contener JSON, se intentará extraer manualmente")
+                
+                # Extraer JSON del contenido
+                json_data = extract_json_safely(content_text)
+                
+                # Añadir thread_id
+                if isinstance(json_data, dict):
+                    json_data["thread_id"] = thread_id
+                
+                # Añadir texto original si no está incluido
+                if isinstance(json_data, dict) and "texto_original" not in json_data:
+                    # Extraer texto original del mensaje del usuario
+                    for user_msg in messages_response["data"]:
+                        if user_msg["role"] == "user":
+                            user_text = ""
+                            for content_item in user_msg.get("content", []):
+                                if content_item["type"] == "text":
+                                    user_text += content_item["text"]["value"]
+                            # Buscar el texto original
+                            import re
+                            texto_match = re.search(r'TEXTO PARA CORREGIR:\s*["\']([^"\']+)["\']', user_text)
+                            if texto_match:
+                                json_data["texto_original"] = texto_match.group(1)
+                            else:
+                                # Si no encuentra el patrón, usar todo el mensaje
+                                json_data["texto_original"] = user_text
+                            break
+                
+                # Asegurar que hay una estructura mínima
+                if isinstance(json_data, dict):
+                    if "errores" not in json_data:
+                        json_data["errores"] = {
+                            "Gramática": [],
+                            "Léxico": [],
+                            "Puntuación": [],
+                            "Estructura textual": []
+                        }
+                    if "texto_corregido" not in json_data:
+                        json_data["texto_corregido"] = content_text
+                
+                # Guardar métricas
+                tiempo_total = time.time() - tiempo_inicio
+                guardar_metricas_modelo(
+                    modelo=self.current_model,
+                    tiempo_respuesta=tiempo_total,
+                    longitud_texto=longitud_estimada,
+                    resultado_exitoso="error" not in json_data
+                )
+                
+                # Registrar éxito
+                circuit_breaker.record_success("openai")
+                
+                logger.info(f"Solicitud completada en {tiempo_total:.2f}s")
+                return content_text, json_data
+            
+            except TimeoutError as e:
+                logger.warning(f"Timeout en intento {attempt+1}/{max_retries}: {e}")
+                
+                if attempt == max_retries - 1:
+                    # Si es el último intento, registrar fallo
+                    circuit_breaker.record_failure("openai", error_type="timeout")
+                    tiempo_total = time.time() - tiempo_inicio
+                    guardar_metricas_modelo(
+                        modelo=self.current_model,
+                        tiempo_respuesta=tiempo_total,
+                        longitud_texto=longitud_estimada,
+                        resultado_exitoso=False
+                    )
+                    return None, {
+                        "error": f"Timeout después de {max_retries} intentos",
+                        "texto_corregido": "Lo siento, el servicio de corrección está tardando demasiado en responder. Por favor, intenta nuevamente en unos momentos.",
+                        "errores": {
+                            "Gramática": [],
+                            "Léxico": [],
+                            "Puntuación": [],
+                            "Estructura textual": []
+                        }
+                    }
+                
+                # Esperar antes de reintentar
+                wait_time = min(60, 4 ** attempt)
+                logger.info(f"Esperando {wait_time}s antes de reintentar")
+                time.sleep(wait_time)
+                
+            except Exception as e:
+                logger.warning(f"Error en intento {attempt+1}/{max_retries}: {e}")
+                
+                if attempt == max_retries - 1:
+                    # Si es el último intento, registrar fallo
+                    circuit_breaker.record_failure("openai", error_type="general")
+                    tiempo_total = time.time() - tiempo_inicio
+                    guardar_metricas_modelo(
+                        modelo=self.current_model,
+                        tiempo_respuesta=tiempo_total,
+                        longitud_texto=longitud_estimada,
+                        resultado_exitoso=False
+                    )
+                    return None, {
+                        "error": f"Error: {str(e)}",
+                        "texto_corregido": "Lo siento, ha ocurrido un error al procesar tu texto. Por favor, intenta nuevamente.",
+                        "errores": {
+                            "Gramática": [],
+                            "Léxico": [],
+                            "Puntuación": [],
+                            "Estructura textual": []
+                        }
+                    }
+                
+                # Esperar antes de reintentar
+                wait_time = min(60, 2 ** attempt)
+                logger.info(f"Esperando {wait_time}s antes de reintentar")
+                time.sleep(wait_time)
+    
+    except Exception as e:
+        # Error general
+        logger.error(f"Error general: {e}")
+        circuit_breaker.record_failure("openai", error_type="general")
+        tiempo_total = time.time() - tiempo_inicio
+        guardar_metricas_modelo(
+            modelo=self.current_model if hasattr(self, 'current_model') else "desconocido",
+            tiempo_respuesta=tiempo_total,
+            longitud_texto=longitud_estimada,
+            resultado_exitoso=False
+        )
+        return None, {
+            "error": f"Error general: {str(e)}",
+            "texto_corregido": "Lo siento, ha ocurrido un error inesperado. Por favor, intenta nuevamente más tarde.",
+            "errores": {
+                "Gramática": [],
+                "Léxico": [],
+                "Puntuación": [],
+                "Estructura textual": []
+            }
+        }
 
 def get_clean_openai_assistants_client():
     """
