@@ -259,15 +259,51 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
                 "texto_original": texto_input
             }
         
-        # Preparar mensaje para el asistente
-        user_message = (
-            f"Por favor, corrige el siguiente texto de nivel {nivel}. " 
-            f"Nivel de detalle: {detalle}. Idioma para explicaciones: {idioma}.\n\n"
-            f"TEXTO PARA CORREGIR:\n\"{texto_input}\"\n\n"
-            f"Por favor, analiza y corrige todos los errores. Utiliza la función 'get_evaluation_criteria' "
-            f"para obtener los criterios específicos para este nivel y 'get_user_profile' si necesitas "
-            f"información detallada del estudiante."
-        )
+        # Obtener información del perfil del usuario si está disponible
+        perfil_usuario = {}
+        if user_id:
+            try:
+                perfil_usuario = get_user_profile_data(user_id)
+                logger.info(f"Perfil recuperado para usuario {user_id}")
+            except Exception as profile_error:
+                logger.warning(f"Error obteniendo perfil: {str(profile_error)}")
+        
+        # Preparar mensaje para el asistente con más contexto
+        user_message = f"""
+Por favor, corrige el siguiente texto de nivel {nivel}. 
+Nivel de detalle: {detalle}. 
+Idioma para explicaciones: {idioma}.
+
+TEXTO PARA CORREGIR:
+"{texto_input}"
+
+INSTRUCCIONES IMPORTANTES:
+1. Tu respuesta DEBE estar en formato JSON, siguiendo exactamente la estructura solicitada en las instrucciones.
+2. Es OBLIGATORIO incluir los campos "saludo", "tipo_texto", "errores", "texto_corregido", "analisis_contextual" y "consejo_final".
+3. Utiliza la función 'get_evaluation_criteria' para obtener criterios específicos para este nivel.
+4. Utiliza 'get_user_profile' si necesitas información detallada del estudiante.
+5. No escribas ningún texto fuera del objeto JSON.
+
+Asegúrate de que tu respuesta comience con '{' y termine con '}', y que sea un JSON válido.
+"""
+        
+        # Si tenemos información de perfil, incluirla
+        if perfil_usuario:
+            # Añadir información contextual del perfil
+            user_message += f"""
+PERFIL DEL ESTUDIANTE:
+- Nivel MCER: {perfil_usuario.get('nivel_mcer', nivel)}
+- Idioma nativo: {perfil_usuario.get('idioma_nativo', 'No especificado')}
+- Objetivos de aprendizaje: {', '.join(perfil_usuario.get('objetivos_aprendizaje', ['No especificados']))}
+- Número de correcciones previas: {perfil_usuario.get('numero_correcciones', 0)}
+"""
+            
+            # Añadir estadísticas de errores si están disponibles
+            if "estadisticas_errores" in perfil_usuario and perfil_usuario["estadisticas_errores"]:
+                user_message += "- Áreas con dificultades:\n"
+                for tipo, cantidad in perfil_usuario["estadisticas_errores"].items():
+                    if cantidad > 0:
+                        user_message += f"  - {tipo}: {cantidad} errores\n"
         
         # Procesar con OpenAI Assistants v2 usando function calling
         logger.info(f"Enviando texto de longitud {len(texto_input)} a procesar")
@@ -306,22 +342,12 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
             
             # Si hay contenido pero no JSON válido, intentar extraer manualmente
             if content:
-                # Intentar extraer JSON con regex
-                json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
-                if json_match:
-                    try:
-                        data = json.loads(json_match.group(1))
-                        logger.info("JSON extraído con regex de código")
-                    except json.JSONDecodeError:
-                        logger.warning("Error decodificando JSON dentro de bloques de código")
+                # Importar extract_json_safely desde clean_openai_assistant
+                from core.clean_openai_assistant import extract_json_safely
                 
-                # Si no hay coincidencia, intentar parsear todo el contenido
-                if not isinstance(data, dict) or "errores" not in data:
-                    try:
-                        data = json.loads(content)
-                        logger.info("Content completo procesado como JSON")
-                    except json.JSONDecodeError:
-                        logger.warning("El content no es un JSON válido")
+                # Intentar extraer JSON del contenido
+                data = extract_json_safely(content)
+                logger.info("JSON extraído manualmente del content")
             
             # Si aún no tenemos datos válidos, crear estructura mínima
             if not isinstance(data, dict) or "errores" not in data:
@@ -356,7 +382,9 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
                 errores_conteo = {}
                 errores = data.get("errores", {})
                 for categoria, lista_errores in errores.items():
-                    errores_conteo[categoria.lower()] = len(lista_errores) if isinstance(lista_errores, list) else 0
+                    # Normalizar categoría (minúsculas)
+                    cat_norm = categoria.lower()
+                    errores_conteo[cat_norm] = len(lista_errores) if isinstance(lista_errores, list) else 0
                 
                 # Extraer puntuación global (promedio de análisis contextual)
                 puntuacion_global = 0
@@ -366,7 +394,7 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
                 for seccion in ["coherencia", "cohesion", "registro_linguistico", "adecuacion_cultural"]:
                     if seccion in analisis and "puntuacion" in analisis[seccion]:
                         try:
-                            puntuacion_global += analisis[seccion]["puntuacion"]
+                            puntuacion_global += float(analisis[seccion]["puntuacion"])
                             num_puntuaciones += 1
                         except (TypeError, ValueError):
                             pass
@@ -377,8 +405,12 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
                 else:
                     puntuacion_global = 5.0  # Valor por defecto
                 
-                # Guardar en Firebase
-                correccion_id = save_correccion(
+                # Guardar en Firebase usando la función correcta
+                # Importar explícitamente para evitar el error de nombre no definido
+                from core.firebase_client import save_correction_with_stats
+                
+                # Llamar a la función correcta
+                correccion_id = save_correction_with_stats(
                     user_id=user_id,
                     texto_original=texto_input,
                     texto_corregido=data.get("texto_corregido", ""),
@@ -387,7 +419,11 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
                     puntuacion=puntuacion_global
                 )
                 
-                logger.info(f"Corrección guardada para usuario {user_id} con ID {correccion_id}")
+                if correccion_id:
+                    logger.info(f"Corrección guardada para usuario {user_id} con ID {correccion_id}")
+                else:
+                    logger.warning(f"No se pudo guardar la corrección para usuario {user_id}")
+                
             except Exception as firebase_error:
                 logger.error(f"Error guardando corrección en Firebase: {str(firebase_error)}")
                 logger.debug(traceback.format_exc())
