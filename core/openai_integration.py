@@ -147,6 +147,7 @@ def get_thread_for_user(user_id=None):
 def process_function_calls(assistant_id, thread_id, run_id, client):
     """
     Procesa las llamadas a funciones que el asistente solicita.
+    Versión mejorada con mejor logging y manejo de errores.
     
     Args:
         assistant_id (str): ID del asistente
@@ -159,11 +160,14 @@ def process_function_calls(assistant_id, thread_id, run_id, client):
     """
     try:
         # Verificar estado de la ejecución
+        logger.info(f"Obteniendo estado de ejecución para thread: {thread_id}, run: {run_id}")
         run_status = client._api_request("GET", f"/threads/{thread_id}/runs/{run_id}")
         
         if not run_status or "status" not in run_status:
             logger.error("Error obteniendo estado de la ejecución para procesar función")
             return False
+        
+        logger.info(f"Estado actual de la ejecución: {run_status['status']}")
         
         # Si la ejecución no requiere acción, salir
         if run_status["status"] != "requires_action":
@@ -185,6 +189,8 @@ def process_function_calls(assistant_id, thread_id, run_id, client):
             logger.warning("No se encontraron llamadas a herramientas")
             return False
         
+        logger.info(f"Se encontraron {len(tool_calls)} llamadas a funciones")
+        
         # Procesar cada llamada a función
         tool_outputs = []
         
@@ -195,26 +201,54 @@ def process_function_calls(assistant_id, thread_id, run_id, client):
             function_name = function_data.get("name")
             function_args = function_data.get("arguments", "{}")
             
-            logger.info(f"Procesando llamada a función: {function_name}")
+            logger.info(f"Procesando llamada a función: {function_name} con ID: {call_id}")
+            logger.debug(f"Argumentos para {function_name}: {function_args}")
             
             try:
                 # Parsear argumentos
                 arguments = json.loads(function_args)
                 
+                # Log detallado
+                logger.info(f"Argumentos parseados correctamente para {function_name}")
+                
+                # Verificar si la función existe en FUNCTIONS_MAP
+                from features.functions_definitions import FUNCTIONS_MAP
+                if function_name not in FUNCTIONS_MAP:
+                    logger.error(f"Función {function_name} no encontrada en FUNCTIONS_MAP")
+                    tool_outputs.append({
+                        "tool_call_id": call_id,
+                        "output": json.dumps({"error": f"Función {function_name} no encontrada"}, ensure_ascii=False)
+                    })
+                    continue
+                
                 # Ejecutar la función
                 result = execute_function(function_name, arguments)
+                
+                # Convertir el resultado a JSON
+                result_json = json.dumps(result, ensure_ascii=False)
+                logger.info(f"Función {function_name} ejecutada correctamente")
+                logger.debug(f"Resultado de {function_name}: {result_json[:200]}...")
                 
                 # Añadir resultado a las salidas
                 tool_outputs.append({
                     "tool_call_id": call_id,
-                    "output": json.dumps(result, ensure_ascii=False)
+                    "output": result_json
+                })
+            
+            except json.JSONDecodeError as json_error:
+                error_msg = f"Error parseando argumentos para {function_name}: {str(json_error)}"
+                logger.error(error_msg)
+                
+                # Añadir error a las salidas
+                tool_outputs.append({
+                    "tool_call_id": call_id,
+                    "output": json.dumps({"error": error_msg}, ensure_ascii=False)
                 })
                 
-                logger.info(f"Función {function_name} ejecutada correctamente")
-            
             except Exception as func_error:
                 error_msg = f"Error ejecutando función {function_name}: {str(func_error)}"
                 logger.error(error_msg)
+                logger.error(traceback.format_exc())
                 
                 # Añadir error a las salidas
                 tool_outputs.append({
@@ -223,6 +257,7 @@ def process_function_calls(assistant_id, thread_id, run_id, client):
                 })
         
         # Enviar resultados al asistente
+        logger.info(f"Enviando {len(tool_outputs)} resultados de funciones al asistente")
         submit_response = client._api_request(
             "POST", 
             f"/threads/{thread_id}/runs/{run_id}/submit_tool_outputs",
