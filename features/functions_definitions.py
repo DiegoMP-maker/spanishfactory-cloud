@@ -19,6 +19,7 @@ ASSISTANT_FUNCTIONS = [
         "function": {
             "name": "get_user_profile",
             "description": "Obtiene el perfil completo del estudiante, incluyendo nivel MCER, idioma nativo, objetivos de aprendizaje, áreas de interés, y estadísticas de errores previos.",
+            "strict": False,  # Añadimos este parámetro para que coincida con la configuración del asistente
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -36,6 +37,7 @@ ASSISTANT_FUNCTIONS = [
         "function": {
             "name": "get_evaluation_criteria",
             "description": "Obtiene los criterios de evaluación específicos para un nivel MCER determinado.",
+            "strict": False,  # Añadimos este parámetro
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -54,6 +56,7 @@ ASSISTANT_FUNCTIONS = [
         "function": {
             "name": "get_error_statistics",
             "description": "Obtiene estadísticas detalladas de errores previos del estudiante.",
+            "strict": False,  # Añadimos este parámetro
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -71,6 +74,7 @@ ASSISTANT_FUNCTIONS = [
         "function": {
             "name": "get_assessment_examples",
             "description": "Obtiene ejemplos concretos de errores críticos y evaluaciones para un nivel MCER específico.",
+            "strict": False,  # Añadimos este parámetro
             "parameters": {
                 "type": "object",
                 "properties": {
