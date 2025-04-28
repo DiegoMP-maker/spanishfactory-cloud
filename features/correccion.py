@@ -13,13 +13,56 @@ import traceback
 import streamlit as st
 
 from core.openai_integration import process_with_assistant
-from core.clean_openai_assistant import get_student_profile
 from core.circuit_breaker import circuit_breaker
 from core.session_manager import get_user_info, get_session_var
 from config.settings import NIVELES_ESPANOL
 from config.settings import IS_DEV  
 
 logger = logging.getLogger(__name__)
+
+# Definición local de get_student_profile para eliminar dependencia externa
+def get_student_profile(user_id):
+    """
+    Obtiene el perfil completo del estudiante desde Firebase.
+    
+    Args:
+        user_id (str): ID del usuario
+        
+    Returns:
+        dict: Perfil del estudiante o diccionario vacío si no está disponible
+    """
+    if not user_id:
+        return {}
+    
+    try:
+        # Importar dinámicamente para evitar dependencias circulares
+        from core.firebase_client import get_user_data
+        
+        # Obtener datos del usuario
+        user_data = get_user_data(user_id)
+        
+        # Extraer información relevante para el perfil
+        profile = {
+            "nivel_mcer": user_data.get("nivel", "B1"),
+            "idioma_nativo": user_data.get("idioma_nativo", ""),
+            "objetivos_aprendizaje": user_data.get("objetivos_aprendizaje", []),
+            "areas_interes": user_data.get("areas_interes", []),
+            "numero_correcciones": user_data.get("numero_correcciones", 0)
+        }
+        
+        # Añadir estadísticas de errores si están disponibles
+        if "errores_por_tipo" in user_data:
+            profile["estadisticas_errores"] = user_data["errores_por_tipo"]
+            
+        # Añadir preferencias de feedback si están disponibles
+        if "preferencias_feedback" in user_data:
+            profile["preferencias_feedback"] = user_data["preferencias_feedback"]
+            
+        return profile
+    
+    except Exception as e:
+        logger.error(f"Error obteniendo perfil del estudiante: {str(e)}")
+        return {}
 
 # System prompt completo para el asistente de corrección
 SYSTEM_PROMPT_CORRECTION = """🧩 Contexto:
