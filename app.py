@@ -114,6 +114,14 @@ def render_about():
     st.markdown("## ℹ️ Acerca de")
     st.info("La vista de información está en desarrollo. Estará disponible pronto.")
 
+def render_diagnostico():
+    """
+    Renderiza la vista de diagnóstico de perfil.
+    """
+    # Importamos en la función para evitar dependencias circulares
+    from src.diagnostico_perfil import diagnosticar_perfil_estudiante
+    diagnosticar_perfil_estudiante()
+
 def main():
     """
     Función principal que inicia la aplicación.
@@ -151,6 +159,8 @@ def main():
                 render_plan()
             elif pagina_actual == "about":
                 render_about()
+            elif pagina_actual == "diagnostico":
+                render_diagnostico()
             
             # Mostrar pie de página
             mostrar_pie_pagina()
