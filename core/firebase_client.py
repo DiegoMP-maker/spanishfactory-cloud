@@ -926,7 +926,141 @@ def get_user_thread(uid: str):
     except Exception as e:
         logger.error(f"Error en get_user_thread: {e}")
         return None
+        
 
+def get_thread_message_count(thread_id):
+    """
+    Obtiene el número de mensajes en un thread.
+    
+    Args:
+        thread_id (str): ID del thread
+        
+    Returns:
+        int: Número de mensajes o None si hay error
+    """
+    if not thread_id:
+        return None
+        
+    try:
+        # Obtener cliente OpenAI para listar mensajes
+        from core.clean_openai_assistant import get_clean_openai_assistants_client
+        client = get_clean_openai_assistants_client()
+        
+        if not client:
+            logger.error("No se pudo obtener cliente para contar mensajes")
+            return None
+            
+        # Listar mensajes con límite alto para contar todos
+        messages_response = client.list_messages(thread_id, limit=100)
+        
+        if not messages_response or "data" not in messages_response:
+            logger.warning(f"No se pudieron obtener mensajes para thread {thread_id}")
+            return None
+            
+        # Contar mensajes
+        message_count = len(messages_response.get("data", []))
+        logger.info(f"Thread {thread_id} tiene {message_count} mensajes")
+        
+        # Guardar conteo en caché para futura referencia
+        if hasattr(st, "session_state"):
+            st.session_state[f"thread_{thread_id}_message_count"] = message_count
+            st.session_state[f"thread_{thread_id}_count_updated_at"] = time.time()
+            
+        return message_count
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo conteo de mensajes para thread {thread_id}: {e}")
+        return None
+
+def save_thread_metrics(thread_id, user_id, message_count=None, token_estimate=None):
+    """
+    Guarda métricas del thread en Firebase para análisis y optimización.
+    
+    Args:
+        thread_id (str): ID del thread
+        user_id (str): ID del usuario
+        message_count (int, opcional): Número de mensajes
+        token_estimate (int, opcional): Estimación de tokens consumidos
+        
+    Returns:
+        bool: True si se guardó correctamente
+    """
+    if not thread_id or not user_id:
+        return False
+        
+    try:
+        # Obtener BD si está disponible
+        if not firebase_admin._apps:
+            logger.warning("Firebase no inicializado para guardar métricas de thread")
+            return False
+            
+        db = firestore.client()
+        
+        # Si no se proporciona conteo, intentar obtenerlo
+        if message_count is None:
+            message_count = get_thread_message_count(thread_id) or 0
+            
+        # Estimar tokens si no se proporcionan (muy aproximado)
+        if token_estimate is None and message_count:
+            # Estimación simple: ~800 tokens por mensaje en promedio
+            token_estimate = message_count * 800
+            
+        # Crear documento de métricas
+        metrics_data = {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "message_count": message_count,
+            "token_estimate": token_estimate,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+            "is_active": True
+        }
+        
+        # Guardar en colección de métricas
+        db.collection("thread_metrics").document(thread_id).set(metrics_data)
+        logger.info(f"Métricas guardadas para thread {thread_id}: {message_count} mensajes, ~{token_estimate} tokens")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error guardando métricas de thread: {e}")
+        return False
+
+def mark_thread_inactive(thread_id):
+    """
+    Marca un thread como inactivo en la base de datos.
+    Útil para seguimiento de threads rotados.
+    
+    Args:
+        thread_id (str): ID del thread a marcar
+        
+    Returns:
+        bool: True si se marcó correctamente
+    """
+    if not thread_id:
+        return False
+        
+    try:
+        # Obtener BD si está disponible
+        if not firebase_admin._apps:
+            logger.warning("Firebase no inicializado para marcar thread")
+            return False
+            
+        db = firestore.client()
+        
+        # Actualizar estado en métricas
+        db.collection("thread_metrics").document(thread_id).update({
+            "is_active": False,
+            "deactivated_at": firestore.SERVER_TIMESTAMP
+        })
+        
+        logger.info(f"Thread {thread_id} marcado como inactivo")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error marcando thread como inactivo: {e}")
+        return False
+
+# Agregar esta funcionalidad a save_user_thread existente
 def save_user_thread_enhanced(user_id, thread_id):
     """
     Versión mejorada de save_user_thread que también registra métricas.
