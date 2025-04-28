@@ -12,20 +12,13 @@ import streamlit as st
 import time
 import json
 import traceback
-import re
 
 # Importaciones de módulos del proyecto
 from core.clean_openai_assistant import get_clean_openai_assistants_client
 from core.session_manager import get_user_info, set_session_var, get_session_var
 from features.functions_definitions import get_functions_definitions, execute_function
-from core.prompts_manager import get_optimized_correction_prompt
-from core.thread_manager import limit_thread_history, should_limit_thread
 
 logger = logging.getLogger(__name__)
-
-# Constantes para gestión de threads
-MAX_THREAD_MESSAGES = 6  # Número máximo de mensajes en un thread
-THREAD_MESSAGE_THRESHOLD = 10  # Umbral a partir del cual se debe considerar limitar el thread
 
 def get_thread_for_user(user_id=None):
     """
@@ -67,11 +60,6 @@ def get_thread_for_user(user_id=None):
             if assistants_client.verify_thread(thread_id_session):
                 logger.info(f"Thread de session_state validado: {thread_id_session}")
                 
-                # Verificar si el thread necesita limpieza
-                if should_limit_thread(assistants_client, thread_id_session, THREAD_MESSAGE_THRESHOLD):
-                    logger.info(f"El thread {thread_id_session} necesita limpieza")
-                    limit_thread_history(assistants_client, thread_id_session, MAX_THREAD_MESSAGES // 2)
-                
                 # Si hay user_id, asegurarse de que el thread está guardado en Firebase
                 if user_id:
                     try:
@@ -106,11 +94,6 @@ def get_thread_for_user(user_id=None):
             # Verificar que el thread existe y es válido
             if assistants_client.verify_thread(firebase_thread_id):
                 logger.info(f"Thread de Firebase validado: {firebase_thread_id}")
-                
-                # Verificar si el thread necesita limpieza
-                if should_limit_thread(assistants_client, firebase_thread_id, THREAD_MESSAGE_THRESHOLD):
-                    logger.info(f"El thread {firebase_thread_id} necesita limpieza")
-                    limit_thread_history(assistants_client, firebase_thread_id, MAX_THREAD_MESSAGES // 2)
                 
                 # Guardar en session_state para reutilización
                 set_session_var("thread_id", firebase_thread_id)
@@ -259,93 +242,10 @@ def process_function_calls(assistant_id, thread_id, run_id, client):
         logger.debug(f"Detalles del error:\n{error_details}")
         return False
 
-def process_with_assistant_with_rate_limiting(system_message, user_message, task_type="default", thread_id=None, user_id=None):
-    """
-    Versión mejorada de process_with_assistant con rate limiting y backoff exponencial.
-    Maneja específicamente errores de límite de tasa (TPM) de OpenAI.
-    
-    Args:
-        system_message (str): Mensaje del sistema (instrucciones)
-        user_message (str): Mensaje del usuario (contenido)
-        task_type (str): Tipo de tarea ('correccion_texto', 'generacion_ejercicios', etc.)
-        thread_id (str, opcional): ID del thread existente
-        user_id (str, opcional): ID del usuario
-        
-    Returns:
-        tuple: (respuesta_raw, resultado_json)
-    """
-    max_retries = 5
-    base_delay = 2  # segundos
-    
-    for attempt in range(max_retries):
-        try:
-            # Si es el tipo de tarea de corrección de texto y es primer intento, intentar con prompt ultra-conciso
-            if task_type == "correccion_texto" and attempt == 0:
-                # Obtener número aproximado de palabras
-                words_count = len(user_message.split())
-                
-                # Usar el prompt ultra-conciso
-                # Extraer el idioma del mensaje del usuario
-                idioma_match = re.search(r'Idioma para explicaciones:\s*(\w+)', user_message)
-                idioma = idioma_match.group(1) if idioma_match else "español"
-                
-                # Obtener prompt optimizado
-                optimized_prompt = get_optimized_correction_prompt(words_count, idioma)
-                logger.info(f"Usando prompt ultra-conciso para corrección de texto (intento {attempt+1})")
-                
-                # Procesar con el prompt optimizado
-                return process_with_assistant(optimized_prompt, user_message, task_type, thread_id, user_id)
-            
-            # Para otros intentos o tipos de tarea, usar el prompt normal
-            return process_with_assistant(system_message, user_message, task_type, thread_id, user_id)
-        
-        except Exception as e:
-            error_message = str(e)
-            
-            # Verificar si es un error de límite de tasa
-            is_rate_limit = any(pattern in error_message.lower() for pattern in 
-                               ["tokens per min (tpm)", "rate limit", "too many requests", "request too large"])
-            
-            if is_rate_limit:
-                logger.warning(f"Rate limit alcanzado (intento {attempt+1}/{max_retries})")
-                
-                # Si es primer intento y no estábamos usando prompt ultra-conciso, intentar con él
-                if attempt == 0 and task_type == "correccion_texto" and "ultra-conciso" not in str(system_message):
-                    # Extraer el idioma del mensaje del usuario
-                    idioma_match = re.search(r'Idioma para explicaciones:\s*(\w+)', user_message)
-                    idioma = idioma_match.group(1) if idioma_match else "español"
-                    
-                    # Obtener prompt ultra-conciso
-                    words_count = len(user_message.split())
-                    optimized_prompt = get_optimized_correction_prompt(words_count, idioma)
-                    
-                    logger.info("Cambiando a prompt ultra-conciso para el siguiente intento")
-                    
-                    # No esperar, intentar inmediatamente con el prompt ultra-conciso
-                    continue
-                
-                # Cálculo de backoff exponencial
-                delay = base_delay * (2 ** attempt)
-                logger.info(f"Esperando {delay} segundos antes de reintentar...")
-                time.sleep(delay)
-                
-                if attempt == max_retries - 1:
-                    # Si es el último intento, informar al usuario
-                    logger.error(f"Se superó el número máximo de reintentos ({max_retries}) para el error de rate limit")
-                    return None, {
-                        "error": True,
-                        "mensaje": "El servicio está procesando demasiadas solicitudes en este momento. Por favor, intenta nuevamente en unos minutos.",
-                        "texto_original": user_message
-                    }
-            else:
-                # Si no es un error de tasa, propagar la excepción
-                logger.error(f"Error no relacionado con rate limit: {error_message}")
-                raise
-
 def process_with_assistant(system_message, user_message, task_type="default", thread_id=None, user_id=None):
     """
     Procesa un mensaje con el asistente de OpenAI usando el cliente limpio.
-    Versión mejorada con soporte para Function Calling y limpieza de threads.
+    Versión mejorada con soporte para Function Calling.
     
     Args:
         system_message (str): Mensaje del sistema (instrucciones)
@@ -395,11 +295,6 @@ def process_with_assistant(system_message, user_message, task_type="default", th
         thread_id_valid = False
         if thread_id:
             thread_id_valid = assistants_client.verify_thread(thread_id)
-            
-            # Verificar si el thread necesita limpieza
-            if thread_id_valid and should_limit_thread(assistants_client, thread_id, THREAD_MESSAGE_THRESHOLD):
-                logger.info(f"Limitando historial del thread {thread_id}")
-                limit_thread_history(assistants_client, thread_id, MAX_THREAD_MESSAGES // 2)
         
         # Si no tenemos thread válido, crear uno nuevo
         if not thread_id_valid:
@@ -431,7 +326,7 @@ def process_with_assistant(system_message, user_message, task_type="default", th
         
         # Obtener ID de asistente
         try:
-            # Usar el system_message proporcionado
+            # Siempre pasamos el system_message completo para asegurar que se use el prompt correcto
             assistant_id = assistants_client.get_assistant_id(task_type, system_message)
             logger.info(f"ID de asistente obtenido: {assistant_id}")
         except Exception as e:
@@ -486,27 +381,8 @@ def process_with_assistant(system_message, user_message, task_type="default", th
             # Verificar si ha fallado
             if status in ["failed", "cancelled", "expired"]:
                 error_message = run_status_response.get("last_error", {}).get("message", "Unknown error")
-                
-                # Verificar específicamente si es un error de rate limiting (TPM)
-                if "tokens per min (TPM)" in error_message:
-                    logger.error(f"Error de rate limit (TPM): {error_message}")
-                    
-                    # Obtener detalles específicos del error para informar mejor
-                    requested_tokens = None
-                    limit_tokens = None
-                    
-                    # Intentar extraer los valores con regex
-                    tokens_match = re.search(r'Limit (\d+), Requested (\d+)', error_message)
-                    if tokens_match:
-                        limit_tokens = int(tokens_match.group(1))
-                        requested_tokens = int(tokens_match.group(2))
-                        logger.error(f"Límite TPM: {limit_tokens}, Solicitados: {requested_tokens}")
-                    
-                    # Lanzar excepción con información detallada para que la maneje el rate limiter
-                    raise Exception(f"Rate limit excedido: {error_message}")
-                else:
-                    logger.error(f"Ejecución fallida: {status} - {error_message}")
-                    return None, {"error": f"Ejecución fallida: {status} - {error_message}"}
+                logger.error(f"Ejecución fallida: {status} - {error_message}")
+                return None, {"error": f"Ejecución fallida: {status} - {error_message}"}
             
             # Verificar si requiere acción (función)
             if status == "requires_action":
@@ -571,11 +447,6 @@ def process_with_assistant(system_message, user_message, task_type="default", th
         error_details = traceback.format_exc()
         logger.error(f"Error en process_with_assistant: {str(e)}")
         logger.debug(f"Detalles del error:\n{error_details}")
-        
-        # Verificar si es un error de rate limit y propagarlo para que lo maneje la función con rate limiting
-        if "tokens per min (TPM)" in str(e) or "rate limit" in str(e).lower():
-            raise
-        
         return None, {"error": f"Error en process_with_assistant: {str(e)}"}
 
 def get_user_profile_data(user_id):

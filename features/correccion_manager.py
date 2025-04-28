@@ -15,8 +15,7 @@ import traceback
 import streamlit as st
 
 # Importaciones del proyecto
-from core.openai_integration import process_with_assistant_with_rate_limiting, seleccionar_prompt_por_longitud
-from core.openai_integration import SYSTEM_PROMPT_CORRECTION_CONCISE
+from core.openai_integration import process_with_assistant, get_user_profile_data
 from core.circuit_breaker import circuit_breaker
 from core.session_manager import get_user_info, get_session_var, set_session_var
 from features.functions_definitions import get_evaluation_criteria
@@ -208,7 +207,7 @@ OBLIGATORIO: Devuelve tu respuesta solo como un objeto JSON válido, sin texto a
 def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idioma="español"):
     """
     Procesa un texto para obtener correcciones utilizando OpenAI Assistants v2.
-    Implementación mejorada con manejo de rate limiting, function calling y prompts adaptados a la longitud.
+    Implementación mejorada con function calling y manejo robusto de errores.
     
     Args:
         texto_input (str): Texto a corregir
@@ -270,21 +269,10 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
             f"información detallada del estudiante."
         )
         
-        # Seleccionar el prompt adecuado según la longitud del texto
-        selected_prompt = seleccionar_prompt_por_longitud(
-            texto_input, 
-            SYSTEM_PROMPT_CORRECTION, 
-            SYSTEM_PROMPT_CORRECTION_CONCISE
-        )
-        
-        # Registrar la selección del prompt para diagnóstico
-        prompt_type = "conciso" if selected_prompt == SYSTEM_PROMPT_CORRECTION_CONCISE else "completo"
-        logger.info(f"Usando prompt {prompt_type} para texto de {len(texto_input.split())} palabras")
-        
-        # Procesar con OpenAI Assistants v2 usando la versión con rate limiting
+        # Procesar con OpenAI Assistants v2 usando function calling
         logger.info(f"Enviando texto de longitud {len(texto_input)} a procesar")
-        content, data = process_with_assistant_with_rate_limiting(
-            system_message=selected_prompt,
+        content, data = process_with_assistant(
+            system_message=SYSTEM_PROMPT_CORRECTION,
             user_message=user_message,
             task_type="correccion_texto",
             thread_id=thread_id,
