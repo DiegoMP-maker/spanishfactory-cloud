@@ -20,6 +20,8 @@ import requests
 # Importar dependencias del proyecto
 from config.settings import MAX_RETRIES, DEFAULT_TIMEOUT
 from core.circuit_breaker import circuit_breaker
+# Importar get_student_profile para poder usarlo en la clase
+from features.correccion import get_student_profile
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -208,6 +210,48 @@ def extract_json_safely(content):
                 "Estructura textual": []
             }
         }
+
+def guardar_metricas_modelo(modelo, tiempo_respuesta, longitud_texto, resultado_exitoso):
+    """
+    Guarda métricas de uso de modelos.
+    
+    Args:
+        modelo: Nombre del modelo usado
+        tiempo_respuesta: Tiempo de respuesta en segundos
+        longitud_texto: Longitud del texto procesado
+        resultado_exitoso: Si la operación fue exitosa
+    """
+    try:
+        # Importar dinámicamente para evitar dependencias circulares
+        from core.firebase_client import save_model_metrics
+        
+        # Intentar guardar métricas
+        save_model_metrics(
+            modelo=modelo,
+            tiempo_respuesta=tiempo_respuesta,
+            longitud_texto=longitud_texto,
+            resultado_exitoso=resultado_exitoso
+        )
+    except Exception as e:
+        # No es crítico si falla
+        logger.warning(f"No se pudieron guardar métricas del modelo: {e}")
+
+class CleanOpenAIAssistants:
+    """
+    Cliente limpio para OpenAI Assistants API.
+    No usa la biblioteca oficial para evitar problemas de configuración.
+    """
+    
+    BASE_URL = "https://api.openai.com/v1"
+    
+    # Diccionario para almacenar IDs de asistentes por tipo de tarea
+    ASSISTANT_IDS = {
+        "correccion_texto": "",
+        "generacion_ejercicios": "",
+        "simulacro_examen": "",
+        "plan_estudio": "",
+        "default": ""
+    }
     
     def __init__(self, api_key):
         """
