@@ -3,7 +3,8 @@
 """
 Vista para la corrección de textos
 ---------------------------------
-Este módulo contiene la vista principal para la corrección de textos en español.
+Este módulo contiene la vista para la corrección de textos,
+separando claramente la interfaz de usuario de la lógica de negocio.
 """
 
 import logging
@@ -13,9 +14,7 @@ import re
 from datetime import datetime
 
 # Importaciones para la corrección de textos
-from features.correccion import corregir_texto, mostrar_resultado_correccion
-from features.exportacion import mostrar_opciones_exportacion
-from features.correccion_utils import display_correccion_result
+from features.correccion_manager import corregir_texto, mostrar_resultado_correccion
 from config.settings import NIVELES_ESPANOL
 
 logger = logging.getLogger(__name__)
@@ -23,6 +22,8 @@ logger = logging.getLogger(__name__)
 def render_view():
     """
     Renderiza la vista de corrección de textos.
+    Esta función se encarga de mostrar la interfaz de usuario y manejar
+    la interacción con el usuario.
     """
     st.markdown("## ✏️ Corrección de Textos")
     st.markdown("""
@@ -50,7 +51,7 @@ def render_view():
         )
         
         # Opciones de configuración
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             # Selector de nivel
@@ -64,10 +65,19 @@ def render_view():
         with col2:
             # Selector de detalle
             nivel_detalle = st.select_slider(
-                "Nivel de detalle en las correcciones",
+                "Nivel de detalle",
                 options=["Básico", "Intermedio", "Detallado"],
                 value="Intermedio",
                 help="Selecciona cuánto detalle quieres en las explicaciones"
+            )
+        
+        with col3:
+            # Selector de idioma
+            idioma_explicaciones = st.selectbox(
+                "Idioma explicaciones",
+                ["español", "inglés", "francés", "portugués", "alemán", "italiano"],
+                index=0,
+                help="Idioma en que se mostrarán las explicaciones de errores"
             )
         
         # Botón para enviar
@@ -84,20 +94,25 @@ def render_view():
                 user_info = get_user_info()
                 user_id = user_info.get("uid") if user_info else None
                 
-                # Procesar con la función de corrección
-                resultado = corregir_texto(
-                    texto=texto_usuario,
-                    nivel=nivel_seleccionado,
-                    detalle=nivel_detalle,
-                    user_id=user_id
-                )
-                
-                if resultado:
-                    # Guardar resultado
-                    st.session_state.correction_result = resultado
-                    st.session_state.mostrar_resultado = True
-                else:
-                    st.error("No se pudo obtener una corrección válida. Por favor, inténtalo de nuevo.")
+                try:
+                    # Procesar con la función de corrección
+                    resultado = corregir_texto(
+                        texto_input=texto_usuario,
+                        nivel=nivel_seleccionado,
+                        detalle=nivel_detalle,
+                        user_id=user_id,
+                        idioma=idioma_explicaciones
+                    )
+                    
+                    if resultado:
+                        # Guardar resultado
+                        st.session_state.correction_result = resultado
+                        st.session_state.mostrar_resultado = True
+                    else:
+                        st.error("No se pudo obtener una corrección válida. Por favor, inténtalo de nuevo.")
+                except Exception as e:
+                    logger.error(f"Error durante el proceso de corrección: {str(e)}")
+                    st.error(f"Error durante el proceso de corrección: {str(e)}")
     
     # Mostrar resultados si están disponibles
     if st.session_state.mostrar_resultado and st.session_state.correction_result:
