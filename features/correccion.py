@@ -13,7 +13,7 @@ import traceback
 import streamlit as st
 
 from core.openai_integration import process_with_assistant
-from core.clean_openai_assistant import get_student_profile as get_user_profile_data
+from core.clean_openai_assistant import get_student_profile
 from core.circuit_breaker import circuit_breaker
 from core.session_manager import get_user_info, get_session_var
 from config.settings import NIVELES_ESPANOL
@@ -246,7 +246,7 @@ def corregir_texto(texto_input, nivel, detalle="Intermedio", user_id=None, idiom
         perfil_usuario = {}
         if user_id:
             try:
-                perfil_usuario = get_user_profile_data(user_id)
+                perfil_usuario = get_student_profile(user_id)
                 logger.info(f"Información de perfil recuperada para usuario {user_id}")
             except Exception as profile_error:
                 logger.warning(f"No se pudo obtener perfil del usuario: {str(profile_error)}")
@@ -332,17 +332,6 @@ Recuerda responder en formato json según las instrucciones.
             # Loguear resultado para debug
             logger.info(f"Recibida respuesta: content={type(content)}, data={type(data) if data is not None else None}")
             
-        except Exception as api_error:
-            logger.error(f"Error en API del asistente: {str(api_error)}")
-            return {
-                "error": True,
-                "mensaje": "Error de comunicación con el servicio. Por favor, inténtalo de nuevo.",
-                "texto_original": texto_input
-            }
-
-            # Loguear resultado para debug
-            logger.info(f"Recibida respuesta: content={type(content)}, data={type(data) if data is not None else None}")
-            
             # Verificar que el system_message ha sido aplicado correctamente
             if data and isinstance(data, dict):
                 # Verificar si la respuesta tiene la estructura esperada según el system prompt
@@ -354,6 +343,14 @@ Recuerda responder en formato json según las instrucciones.
                 else:
                     campos_faltantes = [campo for campo in ["saludo", "tipo_texto", "errores", "texto_corregido", "analisis_contextual", "consejo_final"] if campo not in data]
                     logger.warning(f"❌ Verificación fallida: Faltan campos en la respuesta: {campos_faltantes}")
+            
+        except Exception as api_error:
+            logger.error(f"Error en API del asistente: {str(api_error)}")
+            return {
+                "error": True,
+                "mensaje": "Error de comunicación con el servicio. Por favor, inténtalo de nuevo.",
+                "texto_original": texto_input
+            }
         
         # Validar la respuesta del asistente
         if content is None and data is None:
