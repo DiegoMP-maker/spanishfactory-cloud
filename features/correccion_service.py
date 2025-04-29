@@ -78,6 +78,13 @@ Es CRÍTICO que clasifiques correctamente cada error en su categoría específic
 
 IMPORTANTE: Cada error debe ser clasificado en UNA SOLA categoría. NO repitas el mismo error en múltiples categorías. Revisa cuidadosamente cada error y colócalo en su categoría correcta. NUNCA agrupes todos los errores en una sola categoría.
 
+CRÍTICO - NO INCLUYAS CORRECCIONES VACÍAS: Si no hay error en alguna de las categorías, simplemente deja la lista vacía ([]). NUNCA incluyas un "error" donde el fragmento_erroneo y la correccion sean exactamente iguales. Tampoco incluyas explicaciones que digan "No se identificaron errores".
+
+ESTRUCTURA TEXTUAL - INSTRUCCIÓN ESPECIAL: Siempre debes evaluar si el texto podría beneficiarse de mejoras estructurales. Si el texto carece de conectores o transiciones adecuadas, organización por párrafos o elementos para mejorar coherencia/cohesión, DEBES proponer al menos una mejora en la categoría "Estructura textual", incluso si no hay errores graves. Por ejemplo:
+- Fragmento: "Fui a la playa. Nadé mucho."
+- Corrección: "Fui a la playa donde nadé mucho."
+- Explicación: "Puedes conectar estas ideas usando 'donde' para mejorar la fluidez del texto."
+
 📝 Instrucciones de corrección:
 Clasifica TODOS los errores detectados en las categorías indicadas dentro del campo "errores" del JSON. No omitas ningún error aunque parezca menor.
 
@@ -206,6 +213,7 @@ INSTRUCCIONES CRÍTICAS:
 - Sugerencias concretas y aplicables que el estudiante pueda implementar.
 - Asegúrate de que el texto corregido mantenga la voz y estilo del estudiante.
 - Asegúrate que tus clasificaciones de errores son CORRECTAS y PRECISAS. NO clasifiques errores de léxico como gramática, o puntuación como estructura.
+- SIEMPRE propón mejoras de "Estructura textual" para textos que carezcan de conectores adecuados o buena organización, incluso si no hay errores graves.
 
 
 OBLIGATORIO: Devuelve tu respuesta solo como un objeto JSON válido, sin texto adicional antes ni después. El JSON debe contener la palabra "json" para asegurar un procesamiento correcto."""
