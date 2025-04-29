@@ -219,6 +219,142 @@ def extract_json_safely(content):
             "consejo_final": "Ocurrió un error interno. Por favor, intenta nuevamente."
         }
 
+def validate_error_classification(correction_result):
+    """
+    Valida y mejora la clasificación de errores para garantizar que estén
+    correctamente distribuidos en sus categorías.
+    
+    Args:
+        correction_result (dict): Resultado de la corrección
+        
+    Returns:
+        dict: Resultado de corrección con errores correctamente clasificados
+    """
+    if not correction_result or "errores" not in correction_result:
+        logger.warning("No se pudo validar la clasificación de errores: estructura JSON incompleta")
+        return correction_result
+        
+    errores = correction_result["errores"]
+    
+    # Verificar si todas las categorías existen
+    categorias_errores = ["Gramática", "Léxico", "Puntuación", "Estructura textual"]
+    for categoria in categorias_errores:
+        if categoria not in errores:
+            errores[categoria] = []
+    
+    # Contar errores por categoría
+    total_errores = sum(len(errores[cat]) for cat in categorias_errores)
+    errores_por_categoria = {cat: len(errores[cat]) for cat in categorias_errores}
+    
+    # Detectar si todos o la mayoría de los errores están en una sola categoría
+    categoria_principal = max(errores_por_categoria, key=errores_por_categoria.get)
+    porcentaje_principal = (errores_por_categoria[categoria_principal] / total_errores * 100) if total_errores > 0 else 0
+    
+    logger.info(f"Distribución de errores inicial: {errores_por_categoria}")
+    logger.info(f"Categoría principal: {categoria_principal} ({porcentaje_principal:.1f}%)")
+    
+    # Si más del 80% de los errores están en una sola categoría y hay al menos 3 errores, 
+    # o si hay una sola categoría con errores y el resto vacías, reclasificar
+    if (porcentaje_principal > 80 and total_errores >= 3) or (len([c for c, e in errores_por_categoria.items() if e > 0]) <= 1 and total_errores >= 2):
+        logger.info(f"Detectada distribución desequilibrada de errores. Reclasificando...")
+        
+        # Recolectar todos los errores
+        todos_errores = []
+        for categoria in categorias_errores:
+            todos_errores.extend((error, categoria) for error in errores[categoria])
+            # Vaciar la categoría
+            errores[categoria] = []
+        
+        # Indicadores y patrones para cada tipo de error
+        indicadores = {
+            "Léxico": [
+                "vocabulario", "palabra", "término", "significado", "léxico", 
+                "falso amigo", "selección léxica", "término incorrecto", 
+                "palabra inexistente", "palabra mal escrita", "confusión entre palabras"
+            ],
+            "Puntuación": [
+                "coma", "punto", "tilde", "acento", "mayúscula", "minúscula", 
+                "puntuación", "signo", "interrogación", "exclamación", "ortografía",
+                "acentuación", "mayúscula inicial"
+            ],
+            "Estructura textual": [
+                "párrafo", "estructura", "organización", "conectores", "coherencia", 
+                "orden", "distribución", "separación", "disposición", "cohesión",
+                "flujo textual", "ordenación"
+            ],
+            "Gramática": [
+                "conjugación", "verbo", "tiempo verbal", "concordancia", "género", 
+                "número", "preposición", "artículo", "pronombre", "adverbio", 
+                "subjuntivo", "condicional", "singular", "plural", "masculino", "femenino"
+            ]
+        }
+        
+        # Reclasificar cada error basado en su explicación y fragmentos
+        for error, cat_original in todos_errores:
+            if not isinstance(error, dict):
+                logger.warning(f"Error con formato inválido ignorado: {error}")
+                continue
+                
+            fragmento = error.get("fragmento_erroneo", "").lower()
+            correccion = error.get("correccion", "").lower()
+            explicacion = error.get("explicacion", "").lower()
+            
+            # Combinar todo el texto para análisis
+            texto_completo = f"{fragmento} {correccion} {explicacion}"
+            
+            # Determinar categoría basada en el análisis de palabras clave
+            nueva_categoria = None
+            max_score = 0
+            
+            for categoria, palabras_clave in indicadores.items():
+                # Calcular puntuación basada en coincidencias de palabras clave
+                score = sum(1 for palabra in palabras_clave if palabra.lower() in texto_completo)
+                
+                # Dar prioridad a la categoría original si no hay una clara mejor opción
+                if categoria == cat_original:
+                    score += 0.5
+                
+                if score > max_score:
+                    max_score = score
+                    nueva_categoria = categoria
+            
+            # Si no se encontró categoría clara, mantener la original o usar Gramática como fallback
+            if nueva_categoria is None or max_score == 0:
+                nueva_categoria = cat_original if cat_original else "Gramática"
+            
+            # Casos especiales basados en patrones específicos
+            # 1. Errores de puntuación
+            if re.search(r'[.,;:!¡?¿]', fragmento) or re.search(r'[.,;:!¡?¿]', correccion):
+                puntuacion_pattern = r'(?:coma|punto|signo|interrogación|exclamación|mayúscula)'
+                if re.search(puntuacion_pattern, explicacion) or "may" in explicacion or "min" in explicacion:
+                    nueva_categoria = "Puntuación"
+            
+            # 2. Errores de estructura claros
+            if len(fragmento.split()) >= 4 and len(correccion.split()) >= 4:
+                if abs(len(fragmento.split()) - len(correccion.split())) <= 1 and "orden" in explicacion:
+                    nueva_categoria = "Estructura textual"
+            
+            # 3. Errores de léxico claros
+            if fragmento in correccion or correccion in fragmento:
+                if len(fragmento) - len(correccion) <= 3 and len(correccion) - len(fragmento) <= 3:
+                    if not any(word in explicacion for word in indicadores["Gramática"]):
+                        nueva_categoria = "Léxico"
+            
+            # 4. Preposiciones siempre son gramática
+            if re.search(r'\b(a|de|en|por|para|con|sin)\b', fragmento) and re.search(r'\b(a|de|en|por|para|con|sin)\b', correccion):
+                if len(fragmento.split()) <= 3 and len(correccion.split()) <= 3:
+                    nueva_categoria = "Gramática"
+            
+            # Añadir a la categoría correcta
+            errores[nueva_categoria].append(error)
+        
+        # Registrar la nueva distribución
+        nueva_distribucion = {cat: len(errores[cat]) for cat in categorias_errores}
+        logger.info(f"Nueva distribución de errores después de reclasificación: {nueva_distribucion}")
+    
+    correction_result["errores"] = errores
+    return correction_result
+
 def validate_correction_json(json_data):
     """
     Valida y completa un JSON de corrección para asegurar que tiene todos los campos necesarios.
@@ -366,6 +502,9 @@ def ensure_correction_structure(json_data, texto_original=None):
     """
     # Validar el JSON
     json_data = validate_correction_json(json_data)
+    
+    # Aplicar la validación de clasificación de errores
+    json_data = validate_error_classification(json_data)
     
     # Normalizar claves para backend
     normalized_json = normalize_json_keys(json_data)
