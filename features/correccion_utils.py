@@ -53,7 +53,7 @@ def display_correccion_result(result_data):
         with col_original:
             st.markdown("#### Texto original")
             st.text_area(
-                label="",
+                label="Texto original",
                 value=texto_original,
                 height=200,
                 disabled=True,
@@ -63,7 +63,7 @@ def display_correccion_result(result_data):
         with col_corregido:
             st.markdown("#### Texto corregido")
             st.text_area(
-                label="",
+                label="Texto corregido",
                 value=texto_corregido,
                 height=200,
                 disabled=True,
@@ -223,12 +223,11 @@ def highlight_errors_in_text(texto, errores):
             # Escapar caracteres especiales para regex
             fragmento_escaped = re.escape(fragmento)
             
-            # Crear etiqueta HTML para resaltar
-            etiqueta_html = f'<span style="background-color: {color};" title="{categoria}">{fragmento}</span>'
-            
             # Reemplazar en el texto (solo coincidencias exactas)
+            # Usando r-string para evitar problemas con secuencias de escape
+            pattern = fr'(?<![^\s]){fragmento_escaped}(?![^\s])'
             texto_html = re.sub(
-                f'(?<![^\s]){fragmento_escaped}(?![^\s])', 
+                pattern, 
                 etiqueta_html, 
                 texto_html
             )
