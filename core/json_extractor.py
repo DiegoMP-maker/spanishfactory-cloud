@@ -241,13 +241,36 @@ def validate_error_classification(correction_result):
     for categoria in categorias_errores:
         if categoria not in errores:
             errores[categoria] = []
+            
+    # Limpiar errores redundantes o vacíos (donde fragmento_erroneo = correccion)
+    for categoria in categorias_errores:
+        if not isinstance(errores[categoria], list):
+            errores[categoria] = []
+            continue
+            
+        # Filtrar errores válidos
+        errores_validos = []
+        for error in errores[categoria]:
+            if not isinstance(error, dict):
+                continue
+                
+            fragmento = error.get("fragmento_erroneo", "")
+            correccion = error.get("correccion", "")
+            
+            # Si el fragmento erróneo y la corrección son idénticos, o la explicación indica que no hay errores,
+            # no incluir este error
+            if fragmento != correccion and "no se identificaron errores" not in error.get("explicacion", "").lower():
+                errores_validos.append(error)
+        
+        # Reemplazar con la lista filtrada
+        errores[categoria] = errores_validos
     
     # Contar errores por categoría
     total_errores = sum(len(errores[cat]) for cat in categorias_errores)
     errores_por_categoria = {cat: len(errores[cat]) for cat in categorias_errores}
     
     # Detectar si todos o la mayoría de los errores están en una sola categoría
-    categoria_principal = max(errores_por_categoria, key=errores_por_categoria.get)
+    categoria_principal = max(errores_por_categoria, key=errores_por_categoria.get) if errores_por_categoria else "Gramática"
     porcentaje_principal = (errores_por_categoria[categoria_principal] / total_errores * 100) if total_errores > 0 else 0
     
     logger.info(f"Distribución de errores inicial: {errores_por_categoria}")
@@ -352,9 +375,64 @@ def validate_error_classification(correction_result):
         nueva_distribucion = {cat: len(errores[cat]) for cat in categorias_errores}
         logger.info(f"Nueva distribución de errores después de reclasificación: {nueva_distribucion}")
     
+    # Verificar si hay propuestas de estructura textual
+    # Si no hay ninguna propuesta de estructura y hay al menos un error, inventar una propuesta
+    if len(errores["Estructura textual"]) == 0 and total_errores > 0:
+        logger.info("No hay propuestas de estructura textual. Generando una propuesta básica.")
+        
+        # Extraer el texto corregido para analizarlo
+        texto_corregido = correction_result.get("texto_corregido", "")
+        
+        if texto_corregido:
+            # Detectar frases cortas y separadas que podrían conectarse
+            frases = re.split(r'[.!?]+\s+', texto_corregido)
+            frases = [f.strip() for f in frases if f.strip()]
+            
+            # Si hay al menos dos frases cortas y consecutivas
+            if len(frases) >= 2:
+                for i in range(len(frases) - 1):
+                    # Si ambas frases son cortas (menos de 10 palabras)
+                    if len(frases[i].split()) < 10 and len(frases[i+1].split()) < 10:
+                        fragmento = f"{frases[i]}. {frases[i+1]}"
+                        correccion = f"{frases[i]} porque {frases[i+1].lower()}" if frases[i+1][0].isupper() else f"{frases[i]} porque {frases[i+1]}"
+                        
+                        # Crear propuesta de estructura
+                        propuesta = {
+                            "fragmento_erroneo": fragmento,
+                            "correccion": correccion,
+                            "explicacion": "Para mejorar la cohesión de tu texto, puedes conectar estas ideas usando conectores como 'porque', 'donde', 'ya que', etc."
+                        }
+                        
+                        errores["Estructura textual"].append(propuesta)
+                        logger.info("Generada propuesta de estructura textual")
+                        break
+            
+            # Si no se pudo hacer propuesta con frases, buscar oraciones sin conectores
+            if len(errores["Estructura textual"]) == 0 and len(texto_corregido) > 100:
+                # Buscar párrafos sin conectores
+                conectores = ["además", "sin embargo", "por lo tanto", "en consecuencia", "es decir", 
+                              "por ejemplo", "en primer lugar", "finalmente", "en conclusión"]
+                
+                # Si no hay ningún conector común en un texto largo
+                if not any(conector in texto_corregido.lower() for conector in conectores):
+                    # Tomar las primeras dos oraciones
+                    match = re.search(r'^([^.!?]+[.!?])\s+([^.!?]+[.!?])', texto_corregido)
+                    if match:
+                        primera = match.group(1)
+                        segunda = match.group(2)
+                        
+                        # Proponer mejora
+                        propuesta = {
+                            "fragmento_erroneo": f"{primera} {segunda}",
+                            "correccion": f"{primera} Además, {segunda.lower() if segunda[0].isupper() else segunda}",
+                            "explicacion": "Tu texto mejoraría con el uso de conectores para enlazar las ideas. Puedes usar 'además', 'por otra parte', 'sin embargo', etc."
+                        }
+                        
+                        errores["Estructura textual"].append(propuesta)
+                        logger.info("Generada propuesta de estructura textual basada en conectores")
+    
     correction_result["errores"] = errores
     return correction_result
-
 def validate_correction_json(json_data):
     """
     Valida y completa un JSON de corrección para asegurar que tiene todos los campos necesarios.
