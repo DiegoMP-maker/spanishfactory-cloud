@@ -2,379 +2,376 @@
 # -*- coding: utf-8 -*-
 """
 Utilidades para la corrección de textos
----------------------------------------
-Este módulo contiene funciones compartidas para procesar los resultados de corrección
-de textos y mostrarlos en la interfaz.
+------------------------------------
+Este módulo proporciona funciones auxiliares para la visualización
+y procesamiento de correcciones de textos.
 """
 
-import logging
-import json
-import re
 import streamlit as st
-from datetime import datetime
-import plotly.graph_objects as go
-import pandas as pd
+import logging
+import re
 
-from utils.contextual_analysis import (
-    display_contextual_analysis,
-    get_chart_toggle
-)
+# Importaciones del proyecto
+from config.settings import COLORES_ERROR
 
 logger = logging.getLogger(__name__)
 
-def count_errors_by_category(errores):
+def display_correccion_result(result_data):
     """
-    Cuenta el número de errores por categoría.
+    Muestra el resultado de la corrección en la interfaz de usuario.
     
     Args:
-        errores (dict): Diccionario con categorías de errores y sus listas
+        result_data (dict): Datos de la corrección a mostrar
         
     Returns:
-        dict: Conteo de errores por categoría
+        None
     """
     try:
-        conteo = {}
+        if not result_data or not isinstance(result_data, dict):
+            st.error("No hay datos de corrección para mostrar")
+            return
+            
+        # Obtener campos principales
+        saludo = result_data.get("saludo", "")
+        tipo_texto = result_data.get("tipo_texto", "")
+        texto_original = result_data.get("texto_original", "")
+        texto_corregido = result_data.get("texto_corregido", "")
+        analisis_contextual = result_data.get("analisis_contextual", {})
+        consejo_final = result_data.get("consejo_final", "")
+        errores = result_data.get("errores", {})
         
-        # Validar que tengamos un diccionario
-        if not isinstance(errores, dict):
-            logger.warning(f"errores no es un diccionario: {type(errores)}")
-            return {}
+        # Mostrar encabezado con saludo personalizado
+        if saludo:
+            st.markdown(f"### {saludo}")
             
-        if not errores:
-            return {}
+        if tipo_texto:
+            st.markdown(f"*Tipo de texto detectado: {tipo_texto}*")
+        
+        # Crear layout con columnas para texto original y corregido
+        col_original, col_corregido = st.columns(2)
+        
+        with col_original:
+            st.markdown("#### Texto original")
+            st.text_area(
+                label="",
+                value=texto_original,
+                height=200,
+                disabled=True,
+                label_visibility="collapsed"
+            )
             
+        with col_corregido:
+            st.markdown("#### Texto corregido")
+            st.text_area(
+                label="",
+                value=texto_corregido,
+                height=200,
+                disabled=True,
+                label_visibility="collapsed"
+            )
+        
+        # Mostrar errores por categoría
+        st.markdown("### Correcciones detalladas")
+        
+        # Contar errores por tipo
+        total_errores = sum(len(errores_lista) for errores_lista in errores.values())
+        if total_errores == 0:
+            st.success("¡No se encontraron errores en tu texto! ¡Excelente trabajo!")
+        else:
+            # Mostrar número total de errores
+            st.info(f"Se encontraron {total_errores} errores en tu texto.")
+            
+            # Crear tabs para las categorías de errores
+            categorias = ["Gramática", "Léxico", "Puntuación", "Estructura textual"]
+            tabs = st.tabs(categorias)
+            
+            # Mostrar errores por categoría en cada tab
+            for i, categoria in enumerate(categorias):
+                with tabs[i]:
+                    errores_categoria = errores.get(categoria, [])
+                    
+                    if not errores_categoria:
+                        st.success(f"No se encontraron errores de {categoria.lower()}.")
+                    else:
+                        st.info(f"**{len(errores_categoria)} errores de {categoria.lower()}**")
+                        
+                        # Para cada error, mostrar fragmento, corrección y explicación
+                        for idx, error in enumerate(errores_categoria):
+                            with st.container():
+                                col1, col2 = st.columns([1, 2])
+                                
+                                with col1:
+                                    # Fragmento erróneo
+                                    st.markdown("❌ **Error:**")
+                                    st.markdown(f"*{error.get('fragmento_erroneo', '')}*")
+                                    
+                                    # Corrección
+                                    st.markdown("✅ **Corrección:**")
+                                    st.markdown(f"*{error.get('correccion', '')}*")
+                                
+                                with col2:
+                                    # Explicación
+                                    st.markdown("💡 **Explicación:**")
+                                    st.markdown(error.get('explicacion', ''))
+                            
+                            # Separador si no es el último error
+                            if idx < len(errores_categoria) - 1:
+                                st.divider()
+        
+        # Mostrar análisis contextual
+        if analisis_contextual:
+            with st.expander("Análisis contextual", expanded=True):
+                # Crear columnas para las cuatro secciones del análisis
+                cols = st.columns(2)
+                
+                # Componentes del análisis contextual
+                componentes = [
+                    {"nombre": "Coherencia", "key": "coherencia"},
+                    {"nombre": "Cohesión", "key": "cohesion"},
+                    {"nombre": "Registro lingüístico", "key": "registro_linguistico"},
+                    {"nombre": "Adecuación cultural", "key": "adecuacion_cultural"}
+                ]
+                
+                # Mostrar cada componente
+                for i, componente in enumerate(componentes):
+                    col_idx = i % 2
+                    with cols[col_idx]:
+                        datos = analisis_contextual.get(componente["key"], {})
+                        
+                        if datos:
+                            st.markdown(f"**{componente['nombre']}**")
+                            
+                            # Puntuación
+                            puntuacion = datos.get("puntuacion", 0)
+                            st.progress(puntuacion/10.0, f"Puntuación: {puntuacion}/10")
+                            
+                            # Comentario
+                            if "comentario" in datos:
+                                st.markdown(datos["comentario"])
+                            
+                            # Sugerencias
+                            sugerencias = datos.get("sugerencias", [])
+                            if sugerencias:
+                                st.markdown("**Sugerencias de mejora:**")
+                                for sugerencia in sugerencias:
+                                    st.markdown(f"* {sugerencia}")
+                                    
+                            # Elementos destacables (solo para adecuación cultural)
+                            if componente["key"] == "adecuacion_cultural":
+                                elementos = datos.get("elementos_destacables", [])
+                                if elementos:
+                                    st.markdown("**Elementos culturales destacables:**")
+                                    for elemento in elementos:
+                                        st.markdown(f"* {elemento}")
+                            
+                            # Tipo detectado (solo para registro lingüístico)
+                            if componente["key"] == "registro_linguistico" and "tipo_detectado" in datos:
+                                st.markdown(f"**Tipo de registro detectado:** {datos['tipo_detectado']}")
+                                
+                            # Adecuación (solo para registro lingüístico)
+                            if componente["key"] == "registro_linguistico" and "adecuacion" in datos:
+                                st.markdown(f"**Adecuación:** {datos['adecuacion']}")
+        
+        # Mostrar consejo final
+        if consejo_final:
+            st.markdown("### Consejo final")
+            st.success(consejo_final)
+            
+    except Exception as e:
+        logger.error(f"Error en display_correccion_result: {str(e)}")
+        st.error(f"Error mostrando el resultado: {str(e)}")
+
+def highlight_errors_in_text(texto, errores):
+    """
+    Resalta los errores en el texto original.
+    
+    Args:
+        texto (str): Texto original
+        errores (dict): Diccionario de errores por categoría
+        
+    Returns:
+        str: Texto con errores resaltados en HTML
+    """
+    try:
+        if not texto or not errores:
+            return texto
+            
+        # Crear una copia del texto para modificar
+        texto_html = texto
+        
+        # Obtenemos todos los errores en una lista
+        errores_planos = []
         for categoria, lista_errores in errores.items():
-            if isinstance(lista_errores, list):
-                conteo[categoria] = len(lista_errores)
-            else:
-                logger.warning(f"lista_errores para {categoria} no es una lista: {type(lista_errores)}")
-                conteo[categoria] = 0
+            color = COLORES_ERROR.get(categoria, "#f0f0f0")
+            for error in lista_errores:
+                if "fragmento_erroneo" in error:
+                    errores_planos.append({
+                        "fragmento": error["fragmento_erroneo"],
+                        "color": color,
+                        "categoria": categoria
+                    })
+        
+        # Ordenar errores por longitud descendente para evitar problemas de solapamiento
+        errores_planos.sort(key=lambda x: len(x["fragmento"]), reverse=True)
+        
+        # Reemplazar cada error por su versión resaltada
+        for error in errores_planos:
+            fragmento = error["fragmento"]
+            color = error["color"]
+            categoria = error["categoria"]
             
-        return conteo
-    
+            # Escapar caracteres especiales para regex
+            fragmento_escaped = re.escape(fragmento)
+            
+            # Crear etiqueta HTML para resaltar
+            etiqueta_html = f'<span style="background-color: {color};" title="{categoria}">{fragmento}</span>'
+            
+            # Reemplazar en el texto (solo coincidencias exactas)
+            texto_html = re.sub(
+                f'(?<![^\s]){fragmento_escaped}(?![^\s])', 
+                etiqueta_html, 
+                texto_html
+            )
+        
+        return texto_html
+        
     except Exception as e:
-        logger.error(f"Error contando errores por categoría: {str(e)}")
-        return {}
+        logger.error(f"Error en highlight_errors_in_text: {str(e)}")
+        return texto
 
-def display_error_table(errores_categoria, categoria):
+def generate_correction_report(correction_data):
     """
-    Muestra los errores en formato de tabla con iconos.
+    Genera un informe de corrección en formato Markdown.
     
     Args:
-        errores_categoria (list): Lista de errores de una categoría
-        categoria (str): Nombre de la categoría
+        correction_data (dict): Datos de la corrección
         
     Returns:
-        None
+        str: Informe en formato Markdown
     """
     try:
-        # Validación de entrada
-        if not isinstance(errores_categoria, list):
-            st.warning(f"Formato inesperado de errores para categoría {categoria}")
-            return
-            
-        if not errores_categoria:
-            st.info(f"No se encontraron errores de {categoria}.")
-            return
+        if not correction_data or not isinstance(correction_data, dict):
+            return "Error: No hay datos de corrección disponibles"
         
-        # Encabezado
-        st.markdown(f"#### {categoria} ({len(errores_categoria)})")
+        # Obtener campos principales
+        saludo = correction_data.get("saludo", "")
+        tipo_texto = correction_data.get("tipo_texto", "")
+        texto_original = correction_data.get("texto_original", "")
+        texto_corregido = correction_data.get("texto_corregido", "")
+        analisis_contextual = correction_data.get("analisis_contextual", {})
+        consejo_final = correction_data.get("consejo_final", "")
+        errores = correction_data.get("errores", {})
         
-        # Mostrar cada error con iconos
-        for error in errores_categoria:
-            # Validar que sea un diccionario
-            if not isinstance(error, dict):
-                st.warning(f"Formato inesperado para error en {categoria}")
-                continue
+        # Crear informe en formato Markdown
+        informe = f"# Informe de Corrección - TextoCorrector ELE\n\n"
+        
+        # Añadir saludo y tipo de texto
+        if saludo:
+            informe += f"## {saludo}\n\n"
+        
+        if tipo_texto:
+            informe += f"*Tipo de texto detectado: {tipo_texto}*\n\n"
+        
+        # Texto original y corregido
+        informe += "## Texto Original\n\n"
+        informe += f"```\n{texto_original}\n```\n\n"
+        
+        informe += "## Texto Corregido\n\n"
+        informe += f"```\n{texto_corregido}\n```\n\n"
+        
+        # Errores por categoría
+        informe += "## Correcciones Detalladas\n\n"
+        
+        # Contar errores por tipo
+        total_errores = sum(len(errores_lista) for errores_lista in errores.values())
+        
+        if total_errores == 0:
+            informe += "¡No se encontraron errores! ¡Excelente trabajo!\n\n"
+        else:
+            informe += f"Se encontraron {total_errores} errores en el texto.\n\n"
+            
+            # Mostrar errores por categoría
+            categorias = ["Gramática", "Léxico", "Puntuación", "Estructura textual"]
+            
+            for categoria in categorias:
+                errores_categoria = errores.get(categoria, [])
                 
-            col1, col2, col3 = st.columns([3, 3, 6])
+                if errores_categoria:
+                    informe += f"### {categoria} ({len(errores_categoria)} errores)\n\n"
+                    
+                    # Para cada error, mostrar fragmento, corrección y explicación
+                    for idx, error in enumerate(errores_categoria):
+                        informe += f"**❌ Error:** _{error.get('fragmento_erroneo', '')}_\n\n"
+                        informe += f"**✅ Corrección:** _{error.get('correccion', '')}_\n\n"
+                        informe += f"**💡 Explicación:** {error.get('explicacion', '')}\n\n"
+                        
+                        # Separador si no es el último error
+                        if idx < len(errores_categoria) - 1:
+                            informe += "---\n\n"
+        
+        # Análisis contextual
+        if analisis_contextual:
+            informe += "## Análisis Contextual\n\n"
             
-            with col1:
-                # Buscar el fragmento erróneo con diferentes posibles claves
-                fragmento = error.get('fragmento_erroneo', 
-                                     error.get('texto', 
-                                              error.get('original', '')))
-                st.markdown(f"❌ **Erróneo:** {fragmento}")
+            # Componentes del análisis contextual
+            componentes = [
+                {"nombre": "Coherencia", "key": "coherencia"},
+                {"nombre": "Cohesión", "key": "cohesion"},
+                {"nombre": "Registro Lingüístico", "key": "registro_linguistico"},
+                {"nombre": "Adecuación Cultural", "key": "adecuacion_cultural"}
+            ]
             
-            with col2:
-                # Buscar la corrección con diferentes posibles claves
-                correccion = error.get('correccion', 
-                                      error.get('sugerencia', 
-                                               error.get('correcto', '')))
-                st.markdown(f"✅ **Corrección:** {correccion}")
+            # Mostrar cada componente
+            for componente in componentes:
+                datos = analisis_contextual.get(componente["key"], {})
                 
-            with col3:
-                # Buscar la explicación con diferentes posibles claves
-                explicacion = error.get('explicacion', 
-                                       error.get('explicación', 
-                                                error.get('razon', '')))
-                st.markdown(f"💡 **Explicación:** {explicacion}")
+                if datos:
+                    informe += f"### {componente['nombre']}\n\n"
+                    
+                    # Puntuación
+                    puntuacion = datos.get("puntuacion", 0)
+                    informe += f"**Puntuación:** {puntuacion}/10\n\n"
+                    
+                    # Comentario
+                    if "comentario" in datos:
+                        informe += f"{datos['comentario']}\n\n"
+                    
+                    # Sugerencias
+                    sugerencias = datos.get("sugerencias", [])
+                    if sugerencias:
+                        informe += "**Sugerencias de mejora:**\n\n"
+                        for sugerencia in sugerencias:
+                            informe += f"* {sugerencia}\n"
+                        informe += "\n"
+                        
+                    # Elementos destacables (solo para adecuación cultural)
+                    if componente["key"] == "adecuacion_cultural":
+                        elementos = datos.get("elementos_destacables", [])
+                        if elementos:
+                            informe += "**Elementos culturales destacables:**\n\n"
+                            for elemento in elementos:
+                                informe += f"* {elemento}\n"
+                            informe += "\n"
+                    
+                    # Tipo detectado (solo para registro lingüístico)
+                    if componente["key"] == "registro_linguistico" and "tipo_detectado" in datos:
+                        informe += f"**Tipo de registro detectado:** {datos['tipo_detectado']}\n\n"
+                        
+                    # Adecuación (solo para registro lingüístico)
+                    if componente["key"] == "registro_linguistico" and "adecuacion" in datos:
+                        informe += f"**Adecuación:** {datos['adecuacion']}\n\n"
+        
+        # Consejo final
+        if consejo_final:
+            informe += "## Consejo Final\n\n"
+            informe += f"{consejo_final}\n\n"
             
-            st.markdown("---")
+        # Añadir pie de página
+        informe += "---\n\n"
+        informe += "*Generado por TextoCorrector ELE*\n"
+        
+        return informe
+        
     except Exception as e:
-        logger.error(f"Error mostrando tabla de errores: {str(e)}")
-        st.error(f"Error mostrando detalles de los errores. Por favor, intenta de nuevo.")
-
-def display_correccion_result(resultado, api_keys=None, circuit_breaker=None):
-    """
-    Muestra el resultado de la corrección en Streamlit con visualizaciones mejoradas.
-    
-    Args:
-        resultado (dict): Resultado de la corrección
-        api_keys (dict, opcional): Diccionario con claves de API
-        circuit_breaker (object, opcional): Objeto CircuitBreaker para control de errores
-        
-    Returns:
-        None
-    """
-    try:
-        # Verificar si hay resultado
-        if not resultado:
-            st.error("No hay resultado disponible para mostrar.")
-            return
-            
-        # Verificar si hay un error explícito en el resultado
-        if "error" in resultado and resultado["error"]:
-            mensaje_error = resultado.get("mensaje", "Error desconocido durante la corrección")
-            st.error(mensaje_error)
-            
-            # Mostrar el texto original si está disponible
-            if "texto_original" in resultado:
-                with st.expander("Tu texto original"):
-                    st.write(resultado["texto_original"])
-            
-            return
-        
-        # Extraer componentes del resultado (adaptado a la estructura JSON específica)
-        texto_original = resultado.get("texto_original", "")
-        texto_corregido = resultado.get("texto_corregido", "")
-        errores = resultado.get("errores", {})
-        analisis_contextual = resultado.get("analisis_contextual", {})
-        consejo_final = resultado.get("consejo_final", "")
-        saludo = resultado.get("saludo", "")
-        tipo_texto = resultado.get("tipo_texto", "")
-        
-        # Usar tabs simplificadas según los requisitos
-        tabs = st.tabs(["Corrección", "Análisis contextual", "Consejo final", "Exportar informe"])
-        
-        # Tab de Corrección
-        with tabs[0]:
-            # Mostrar saludo si existe
-            if saludo:
-                st.markdown(f"### 👋 {saludo}")
-                
-            # Mostrar tipo de texto si existe
-            if tipo_texto:
-                st.markdown(f"**Tipo de texto:** {tipo_texto}")
-                
-            st.markdown("### 📝 Texto corregido")
-            
-            # Verificar que hay texto corregido
-            if not texto_corregido:
-                st.warning("No se generó texto corregido en la respuesta.")
-                if texto_original:
-                    st.text_area("Texto original", texto_original, height=200, disabled=True, label_visibility="collapsed")
-            else:
-                st.text_area("Texto corregido", texto_corregido, height=200, disabled=True, label_visibility="collapsed")
-            
-            st.markdown("### 🔍 Análisis de errores")
-            
-            # Contar errores por categoría
-            conteo_errores = count_errors_by_category(errores)
-            
-            # Verificar si hay errores
-            if not conteo_errores or sum(conteo_errores.values()) == 0:
-                st.success("¡Felicidades! No se encontraron errores en tu texto.")
-            else:
-                # Columnas para mostrar gráfico y desglose
-                col1, col2 = st.columns([1, 1])
-                
-                with col1:
-                    # Crear gráfico de errores
-                    try:
-                        # Preparar datos para el gráfico
-                        categorias = list(conteo_errores.keys())
-                        valores = list(conteo_errores.values())
-                        
-                        if not categorias or not valores:
-                            st.info("No hay suficientes datos para crear el gráfico.")
-                        else:
-                            # Crear paleta de colores dinámica según el número de categorías
-                            default_colors = [
-                                '#F44336',  # Rojo
-                                '#FFC107',  # Amarillo
-                                '#2196F3',  # Azul
-                                '#4CAF50',  # Verde
-                                '#9C27B0'   # Púrpura
-                            ]
-                            
-                            # Asegurarse de tener suficientes colores
-                            colors = default_colors[:len(categorias)]
-                            while len(colors) < len(categorias):
-                                colors.append(default_colors[len(colors) % len(default_colors)])
-                            
-                            # Crear gráfico de barras
-                            fig = go.Figure(data=[
-                                go.Bar(
-                                    x=categorias,
-                                    y=valores,
-                                    marker_color=colors,
-                                    text=valores,
-                                    textposition='auto',
-                                    hoverinfo='text',
-                                    hovertext=[f"{cat}: {val} error{'es' if val != 1 else ''}" for cat, val in zip(categorias, valores)]
-                                )
-                            ])
-                            
-                            # Personalizar diseño
-                            fig.update_layout(
-                                title="Distribución de errores",
-                                xaxis_title="",
-                                yaxis_title="Cantidad de errores",
-                                template="plotly_white",
-                                margin=dict(l=50, r=50, t=70, b=50),
-                                height=300
-                            )
-                            
-                            # Mostrar gráfico
-                            st.plotly_chart(fig, use_container_width=True)
-                        
-                    except Exception as e:
-                        logger.error(f"Error creando gráfico de errores: {str(e)}")
-                        st.warning("No se pudo crear el gráfico de errores.")
-                
-                with col2:
-                    # Mostrar estadísticas de errores
-                    st.markdown("#### Resumen de errores")
-                    
-                    try:
-                        # Verificar que tengamos datos para el DataFrame
-                        if not conteo_errores:
-                            st.info("No hay estadísticas de errores disponibles.")
-                        else:
-                            # Crear DataFrame para estadísticas
-                            df_errores = pd.DataFrame({
-                                "Categoría": list(conteo_errores.keys()),
-                                "Cantidad": list(conteo_errores.values())
-                            })
-                            
-                            # Calcular porcentaje
-                            total_errores = df_errores["Cantidad"].sum()
-                            if total_errores > 0:  # Evitar división por cero
-                                df_errores["Porcentaje"] = df_errores["Cantidad"].apply(
-                                    lambda x: f"{(x/total_errores)*100:.1f}%"
-                                )
-                            else:
-                                df_errores["Porcentaje"] = "0%"
-                            
-                            # Mostrar estadísticas
-                            st.dataframe(
-                                df_errores, 
-                                hide_index=True,
-                                use_container_width=True
-                            )
-                    except Exception as df_error:
-                        logger.error(f"Error creando dataframe de errores: {str(df_error)}")
-                        st.warning("Error mostrando estadísticas de errores.")
-            
-            # Mostrar detalles de errores por categoría
-            st.markdown("### Detalles de errores")
-            
-            # Verificar que errores sea un diccionario
-            if not isinstance(errores, dict):
-                st.warning("Formato de errores inesperado. No se pueden mostrar detalles.")
-                logger.warning(f"errores no es un diccionario: {type(errores)}")
-                
-            else:
-                # Determinar categorías disponibles
-                categorias_disponibles = list(errores.keys())
-                
-                if not categorias_disponibles:
-                    st.info("No hay detalles de errores disponibles.")
-                else:
-                    try:
-                        # Crear tabs para cada categoría
-                        error_tabs = st.tabs(categorias_disponibles)
-                        
-                        for i, categoria in enumerate(categorias_disponibles):
-                            with error_tabs[i]:
-                                display_error_table(errores[categoria], categoria)
-                    except Exception as tabs_error:
-                        logger.error(f"Error mostrando tabs de errores: {str(tabs_error)}")
-                        st.error("Error mostrando los detalles de errores.")
-        
-        # Tab de Análisis contextual
-        with tabs[1]:
-            try:
-                if not analisis_contextual:
-                    st.info("No hay análisis contextual disponible para este texto.")
-                else:
-                    st.markdown("### 📊 Análisis contextual")
-                    
-                    # Obtener tipo de gráfico seleccionado (radar o barras)
-                    chart_type = get_chart_toggle()
-                    
-                    # Mostrar análisis contextual
-                    display_contextual_analysis(analisis_contextual, chart_type)
-            except Exception as context_error:
-                logger.error(f"Error mostrando análisis contextual: {str(context_error)}")
-                st.error("Error mostrando el análisis contextual.")
-        
-        # Tab de Consejo final
-        with tabs[2]:
-            try:
-                if not consejo_final:
-                    st.info("No hay consejo final disponible para este texto.")
-                else:
-                    st.markdown("### 💡 Consejo final")
-                    st.success(consejo_final)
-                    
-                    # Generar audio del consejo si ElevenLabs está disponible
-                    try:
-                        audio_bytes = None
-                        # Verificar disponibilidad de API
-                        if api_keys and "elevenlabs" in api_keys and api_keys["elevenlabs"]["api_key"] and api_keys["elevenlabs"]["voice_id"]:
-                            if circuit_breaker and circuit_breaker.can_execute("elevenlabs"):
-                                # Importar función para generar audio
-                                from core.audio_client import generar_audio_consejo
-                                # Generar audio
-                                audio_bytes = generar_audio_consejo(consejo_final)
-                        
-                        # Mostrar reproductor de audio si se generó correctamente
-                        if audio_bytes:
-                            st.audio(audio_bytes, format="audio/mp3")
-                            st.download_button(
-                                label="⬇️ Descargar audio",
-                                data=audio_bytes,
-                                file_name=f"consejo_{datetime.now().strftime('%Y%m%d_%H%M')}.mp3",
-                                mime="audio/mp3"
-                            )
-                    except Exception as audio_error:
-                        logger.error(f"Error al generar audio: {str(audio_error)}")
-                        # No mostrar mensaje al usuario para evitar confusión
-            except Exception as consejo_error:
-                logger.error(f"Error mostrando consejo final: {str(consejo_error)}")
-                st.error("Error mostrando el consejo final.")
-        
-        # Tab de Exportación
-        with tabs[3]:
-            try:
-                st.markdown("### 📤 Exportar informe")
-                
-                # Importar función para mostrar opciones de exportación
-                from features.exportacion import mostrar_opciones_exportacion
-                
-                # Mostrar opciones
-                mostrar_opciones_exportacion(resultado)
-            except Exception as export_error:
-                logger.error(f"Error mostrando opciones de exportación: {str(export_error)}")
-                st.error("Error al cargar las opciones de exportación.")
-    
-    except Exception as e:
-        logger.error(f"Error mostrando resultado de corrección: {str(e)}")
-        st.error(f"Error al mostrar el resultado de la corrección. Por favor, inténtalo de nuevo más tarde.")
-        
-        # Mostrar texto original si está disponible
-        if isinstance(resultado, dict) and "texto_original" in resultado:
-            with st.expander("Tu texto original"):
-                st.write(resultado["texto_original"])
+        logger.error(f"Error en generate_correction_report: {str(e)}")
+        return f"Error generando informe: {str(e)}"
