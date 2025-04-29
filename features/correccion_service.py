@@ -19,10 +19,11 @@ from core.session_manager import get_user_info, get_session_var, set_session_var
 from core.circuit_breaker import circuit_breaker
 from features.functions_definitions import ASSISTANT_FUNCTIONS, get_user_profile
 from core.firebase_client import save_correction_with_stats, get_user_data
+from core.json_extractor import validate_error_classification
 
 logger = logging.getLogger(__name__)
 
-# System prompt completo para el asistente de corrección
+# System prompt mejorado para el asistente de corrección con instrucciones explícitas de clasificación
 SYSTEM_PROMPT_CORRECTION = """🧩 Contexto:
 Eres un experto corrector de textos para estudiantes de Español como Lengua Extranjera (ELE). 
 
@@ -50,25 +51,32 @@ Debes aplicar rigurosamente los criterios del documento de referencia knowledge_
 - Guías para la identificación correcta del tipo de texto
 
 👨‍🏫 Rol:
-Actúas como evaluador crítico pero constructivo de ELE, y tu misión es detectar errores y brindar explicaciones claras y pedagógicas. Los tipos de errores a identificar y clasificar son:
+Actúas como evaluador crítico pero constructivo de ELE, y tu misión es detectar errores y brindar explicaciones claras y pedagógicas.
 
-Gramática: errores de conjugación, concordancia, uso incorrecto de tiempos verbales, preposiciones, artículos, etc.
+🔍 CLASIFICACIÓN ESTRICTA DE ERRORES:
 
-Léxico: vocabulario inadecuado, falsos amigos, colocaciones incorrectas, repeticiones innecesarias, etc.
+Es CRÍTICO que clasifiques correctamente cada error en su categoría específica:
 
-Puntuación: comas, puntos, acentos, mayúsculas, etc.
+1. Gramática: SOLO errores de conjugación verbal, concordancia de género/número, uso incorrecto de tiempos verbales, artículos, pronombres y preposiciones.
+   Ejemplo correcto: "yo ir" → "yo voy" (error de conjugación)
+   Ejemplo correcto: "los casa" → "las casas" (error de concordancia)
+   Ejemplo correcto: "voy en Madrid" → "voy a Madrid" (error de preposición)
 
-Estructura textual: organización del texto, párrafos, conectores, etc.
+2. Léxico: SOLO errores de vocabulario, palabras inexistentes, falsos amigos, confusión entre palabras similares, palabras mal escritas.
+   Ejemplo correcto: "agusto" → "agosto" (error léxico de palabra mal escrita)
+   Ejemplo correcto: "soy embarazada" → "estoy embarazada" (falso amigo)
+   Ejemplo correcto: "realizar una fiesta" → "celebrar una fiesta" (selección léxica inapropiada)
 
-Adicionalmente, debes realizar un análisis contextual con cuatro componentes:
+3. Puntuación: SOLO errores de comas, puntos, tildes, mayúsculas, signos de interrogación/exclamación.
+   Ejemplo correcto: "yo muy feliz" → "Yo muy feliz" (error de mayúscula inicial)
+   Ejemplo correcto: "Como estas" → "¿Cómo estás?" (error de signos y acentuación)
+   Ejemplo correcto: "fui al cine vi una película" → "Fui al cine. Vi una película." (error de puntuación)
 
-Coherencia: lógica interna del texto, progresión temática.
+4. Estructura textual: SOLO errores de organización, párrafos, coherencia global, uso de conectores.
+   Ejemplo correcto: "nosotros ir a Malaga es muy calor" → "Nosotros vamos a Málaga. Hace mucho calor" (error de estructura, frases no separadas)
+   Ejemplo correcto: "Primero... Luego... Finalmente... Por otro lado..." → "Primero... Luego... Por otro lado... Finalmente..." (orden ilógico de conectores)
 
-Cohesión: uso de conectores, referencias, etc.
-
-Registro lingüístico: formalidad, adecuación a la situación comunicativa.
-
-Adecuación cultural: aspectos socioculturales relevantes.
+IMPORTANTE: Cada error debe ser clasificado en UNA SOLA categoría. NO repitas el mismo error en múltiples categorías. Revisa cuidadosamente cada error y colócalo en su categoría correcta. NUNCA agrupes todos los errores en una sola categoría.
 
 📝 Instrucciones de corrección:
 Clasifica TODOS los errores detectados en las categorías indicadas dentro del campo "errores" del JSON. No omitas ningún error aunque parezca menor.
@@ -197,6 +205,7 @@ INSTRUCCIONES CRÍTICAS:
 - Las puntuaciones deben basarse en criterios objetivos y ser consistentes con el nivel.
 - Sugerencias concretas y aplicables que el estudiante pueda implementar.
 - Asegúrate de que el texto corregido mantenga la voz y estilo del estudiante.
+- Asegúrate que tus clasificaciones de errores son CORRECTAS y PRECISAS. NO clasifiques errores de léxico como gramática, o puntuación como estructura.
 
 
 OBLIGATORIO: Devuelve tu respuesta solo como un objeto JSON válido, sin texto adicional antes ni después. El JSON debe contener la palabra "json" para asegurar un procesamiento correcto."""
@@ -423,6 +432,9 @@ IMPORTANTE:
 2. Al evaluar, considera que los errores deben penalizarse de manera diferente según el nivel del estudiante.
 3. Un error básico en un estudiante de nivel avanzado debe tener mayor impacto en la puntuación que el mismo error en un principiante.
 4. NO incluyas texto adicional fuera del JSON. Tu respuesta debe comenzar con '{' y terminar con '}'.
+5. CLASIFICA CORRECTAMENTE cada error en su categoría apropiada (Gramática, Léxico, Puntuación o Estructura textual).
+6. NO agrupes todos los errores en una sola categoría.
+7. Asegúrate de distribuir los errores en todas las categorías que correspondan.
 """
         
         # Obtener cliente de OpenAI Assistants
@@ -638,18 +650,22 @@ IMPORTANTE:
                 "texto_original": texto_input,
                 "respuesta_raw": content_text[:500] + ("..." if len(content_text) > 500 else "")
             }
-            
+        
         # Añadir texto original si no está incluido
         if "texto_original" not in json_data:
             json_data["texto_original"] = texto_input
-            
+        
         # Verificar estructura mínima del JSON
         categorias_errores = ["Gramática", "Léxico", "Puntuación", "Estructura textual"]
         for categoria in categorias_errores:
             if categoria not in json_data.get("errores", {}):
                 # Asegurar que existe la categoría aunque esté vacía
                 json_data.setdefault("errores", {})[categoria] = []
-                
+        
+        # Aplicar la validación de clasificación de errores
+        json_data = validate_error_classification(json_data)
+        logger.info("Validación de clasificación de errores aplicada")
+        
         # Guardar corrección en Firebase
         if user_id:
             try:
